@@ -13,8 +13,7 @@ import importlib
 import yaml
 import torch
 
-
-from ..mha2mla.lr_scheduler import load_optimizer_scheduler
+from ..mha2mla.run_train import load_optimizer_scheduler
 
 TYPE_DICT = {
     "float32": torch.float32,

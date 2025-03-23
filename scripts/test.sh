@@ -1,6 +1,6 @@
 #################### 环境变量 ####################
 
-export CUDA_VISIBLE_DEVICES="0,1"
+export CUDA_VISIBLE_DEVICES="2"
 export HF_HOME="~/data/hf-home"
 export NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F "," '{print NF}')
 export MASTER_PORT="auto"
@@ -44,11 +44,11 @@ set -e
 
 torchrun --nproc_per_node 1 --master_port 24558 \
     ../test_dbg/test/inference.py \
-    --model_name /home/binguo/data/MLA-FT/checkpoints/rope_v4_topk4_svd_method7_rank32/18000_hf \
+    --model_name /home/binguo/data/MLA-FT/checkpoints/rope_v4_topk4_svd_method7_rank8/18000_hf \
     --is_mla
 
 torchrun --nproc_per_node 1 --master_port 24558 \
     ../test_dbg/test/inference.py \
-    --model_name /home/binguo/data/MLA-FT/checkpoints/rope_v4_topk4_svd_method7_rank32/18000_hf \
+    --model_name /home/binguo/data/MLA-FT/checkpoints/rope_v4_topk4_svd_method7_rank8/18000_hf \
     --is_mla \
     --is_inference

@@ -4,7 +4,6 @@ import torch
 import math
 from torch import nn
 from torch.nn import functional as F
-import copy
 
 from transformers.models.llama.modeling_llama import (
     rotate_half,
@@ -1200,49 +1199,81 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
 
     def __init__(self, config: LlamaConfig, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
-        assert (
-            self.config.SVD["method"] == 7
-        ), "only support SVD method 7 which is SVD_{joint}"
         self.is_inference = False
 
     def matrix_absorb(self):
+        assert (
+            self.config.SVD["method"] == 7
+        ), "only support SVD method 7 which is SVD_{joint}"
         self.is_inference = True
-        self.group_size = self.num_heads // self.num_key_value_heads
-        self.nope_mask_for_q = (
-            self.nope_mask.reshape(self.num_key_value_heads, self.head_dim)
-            .repeat_interleave(self.group_size, dim=0)
+        # q_proj
+        group_size = self.num_heads // self.num_key_value_heads
+        nope_mask_for_q = (
+            self.nope_mask.reshape(self.num_key_value_heads, 1, self.head_dim)
+            .repeat_interleave(group_size, dim=-2)
             .reshape(-1)
         )
-        self.head_rope_dim = (~self.nope_mask_for_q).sum().item() // self.num_heads
-        self.head_nope_dim = self.head_dim - self.head_rope_dim
-        self.W_q_r = nn.Linear(
+        self.nope_mask_for_q = nope_mask_for_q
+        self.W_q_r_absorbed = nn.Linear(
             in_features=self.hidden_size,
-            out_features=(~self.nope_mask_for_q).sum().item(),
+            out_features=(~nope_mask_for_q).sum().item(),
             dtype=self.q_proj.weight.dtype,
             device=self.q_proj.weight.device,
             bias=False,
         )
-        self.W_q_r.weight[:] = self.q_proj.weight.T[..., ~self.nope_mask_for_q].T
-        self.W_q_nope = nn.Linear(
+        self.W_q_r_absorbed.weight[:] = self.q_proj.weight.T[..., ~self.nope_mask_for_q].T
+        self.W_down_q_absorbed = nn.Linear(
             in_features=self.hidden_size,
-            out_features=(self.nope_mask_for_q).sum().item(),
+            out_features=self.num_heads * self.num_key_value_heads * self.low_rank,
             dtype=self.q_proj.weight.dtype,
             device=self.q_proj.weight.device,
             bias=False,
         )
-        self.W_q_nope.weight[:] = self.q_proj.weight.T[..., self.nope_mask_for_q].T
-        self.q_absorb = (
-            self.W_up_k.weight
-            .view(self.num_key_value_heads, self.head_nope_dim, -1)
-            .repeat_interleave(self.group_size, dim=0)
-        ) # [num_attentions_heads, head_nope_dim, num_key_value_heads* low_rank]
-        self.o_absorb = (
-            self.W_up_v.weight.T
-            .view(self.num_key_value_heads*self.low_rank,self.num_key_value_heads,self.head_dim)
-            .repeat_interleave(self.num_key_value_groups,dim=1)
-            .transpose(0,1)
-            .reshape(self.num_heads,self.num_key_value_heads*self.low_rank,self.head_dim)
-        ) # [num_attentions_heads* num_key_value_heads*low_rank, head_dim]
+        # GQA
+        W_q_nope = []
+        W_o_proj = []
+        for i in range(self.num_key_value_heads):
+            # q
+            head_nope_mask = self.nope_mask[
+                ..., i * self.head_dim : (i + 1) * self.head_dim
+            ]
+            head_k_nope_dim = self.W_up_k.out_features // self.num_key_value_heads
+            head_W_up_k = self.W_up_k.weight[
+                i * head_k_nope_dim : (i + 1) * head_k_nope_dim, :
+            ]
+            # o
+            head_W_up_v = self.W_up_v.weight[
+                i * self.head_dim : (i + 1) * self.head_dim, :
+            ]
+            for j in range(group_size):
+                # q
+                head_w_q_nope = self.q_proj.weight.T[
+                    ...,
+                    (i * group_size + j)
+                    * self.head_dim : (i * group_size + j + 1)
+                    * self.head_dim,
+                ]
+                head_w_q_nope = head_w_q_nope[..., head_nope_mask]
+                W_q_nope.append(head_w_q_nope @ (head_W_up_k))
+                # o
+                head_w_o_proj = self.o_proj.weight[
+                    ...,
+                    (i * group_size + j)
+                    * self.head_dim : (i * group_size + j + 1)
+                    * self.head_dim,
+                ]
+                W_o_proj.append((head_W_up_v.T) @ (head_w_o_proj.T))
+        W_q_nope = torch.cat(W_q_nope, dim=-1)
+        o_oroj_weight = torch.cat(W_o_proj, dim=0)
+        self.W_down_q_absorbed.weight[:] = W_q_nope.T
+        self.o_proj_absorbed = nn.Linear(
+            in_features=self.num_heads * self.num_key_value_heads * self.low_rank,
+            out_features=self.hidden_size,
+            dtype=self.q_proj.weight.dtype,
+            device=self.q_proj.weight.device,
+            bias=False,
+        )
+        self.o_proj_absorbed.weight[:] = o_oroj_weight.T
 
     def get_qk_states_for_decode(
         self,
@@ -1271,7 +1302,7 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
             device=hidden_states.device,
             dtype=hidden_states.dtype,
         )
-        q_r = self.W_q_r(hidden_states)
+        q_r = self.W_q_r_absorbed(hidden_states)
         k_r = self.W_k_r(hidden_states)
         query_states[..., ~self.nope_mask_for_q] = q_r
         key_states[..., ~self.nope_mask] = k_r
@@ -1300,7 +1331,12 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
         k_r = key_states[..., ~self.nope_mask]
 
         # prepare c_kv
-        c_kv = self.W_down_k(hidden_states)
+        if self.is_share_W_down:
+            c_kv = self.W_down_k(hidden_states)
+        else:
+            c_kv = torch.cat(
+                [self.W_down_k(hidden_states), self.W_down_v(hidden_states)], dim=-1
+            )
         q_r = q_r.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
         k_r = k_r.view(bsz, q_len, self.num_key_value_heads, -1).transpose(
             1, 2
@@ -1312,28 +1348,17 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
         )  # [bsz,1,q_len,self.low_rank * self.num_key_value_heads]
 
         # prepare q_nope
-        q_nope = self.W_q_nope(hidden_states).reshape(bsz,q_len,self.num_heads,self.head_nope_dim).transpose(1,2) # [bsz,num_attention_heads,q_len,head_nope_dim]
-        if q_len == 1:
-            q_nope = torch.matmul(
-                q_nope.transpose(0, 2), self.q_absorb
-            ).transpose(0,2)
-        else:
-            q_nope = torch.matmul(
-                q_nope, self.q_absorb
-            )  # [bsz,num_attention_heads,q_len,num_key_value_heads*low_rank]
+        q_nope = self.W_down_q_absorbed(hidden_states)
+        q_nope = q_nope.view(
+            bsz, q_len, self.num_heads, self.low_rank * self.num_key_value_heads
+        ).transpose(1, 2)
 
         assert past_key_value is not None
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
-        if (
-            len(past_key_value.value_cache) > 0
-            and past_key_value.value_cache[0].shape[1] != 1
-        ):  # change c_kv from prefill format to decode format
+        if len(past_key_value.value_cache)>0 and past_key_value.value_cache[0].shape[1] != 1: # change c_kv from prefill format to decode format
             value_cache = past_key_value.value_cache
             value_cache = [
-                value_cache[i]
-                .transpose(1, 2)
-                .reshape(bsz, -1, 1, self.low_rank * self.num_key_value_heads)
-                .transpose(1, 2)
+                value_cache[i].transpose(1, 2).reshape(bsz, -1, 1, self.low_rank * self.num_key_value_heads).transpose(1, 2)
                 for i in range(len(value_cache))
             ]
             past_key_value.value_cache = value_cache
@@ -1368,7 +1393,7 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
             self.matrix_absorb()
 
         bsz, q_len, _ = hidden_states.size()
-        if q_len != 1 or not use_cache:
+        if q_len!=1 or not use_cache:
             # Prefill stage
             return super().forward(
                 hidden_states,
@@ -1415,12 +1440,9 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.attention_dropout, training=self.training
         )
-        attn_output = torch.matmul(attn_weights, c_kv) # [bsz, num_attention_heads, q_len, low_rank * num_key_value_heads]
-        if q_len==1:
-            attn_output = torch.matmul(attn_output.transpose(0,2), self.o_absorb).transpose(0,2).reshape(bsz,q_len,self.num_heads*self.head_dim)
-        else:
-            attn_output = torch.matmul(attn_output, self.o_absorb).reshape(bsz,q_len,self.num_heads*self.head_dim)
-        attn_output = self.o_proj(attn_output)
+        attn_output = torch.matmul(attn_weights, c_kv)
+        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, -1)
+        attn_output = self.o_proj_absorbed(attn_output)
 
         return attn_output, None, past_key_value
 
@@ -1460,7 +1482,6 @@ def state_dict_svd_init(model, state_dict):
         )
     return state_dict
 
-
 @classmethod
 def custom_load_pretrained_model(
     cls,
@@ -1493,7 +1514,6 @@ def custom_load_pretrained_model(
         state_dict = state_dict_svd_init(model, state_dict)
         loaded_keys = list(state_dict.keys())
     import copy
-
     old_k_r_weight = copy.deepcopy(model.model.layers[0].self_attn.W_k_r.weight)
     outputs = cls.original_load_pretrained_model(
         model,
@@ -1519,7 +1539,6 @@ def custom_load_pretrained_model(
         assert not (old_k_r_weight == new_k_r_weight).all()
     return outputs
 
-
 def partial_rope_monkey_patch(rope_cfg):
     """
     Monkey patching the LLAMA model to use the partial-RoPE.
@@ -1529,8 +1548,8 @@ def partial_rope_monkey_patch(rope_cfg):
         rope_cfg
     )
     if rope_cfg["partial_rope_version"] == 4:
-        IndexForNope._qk_tensor_cache = torch.load(rope_cfg["qk_tensor_path"])
-        IndexForNope._qk_tensor_path = rope_cfg["qk_tensor_path"]
+        IndexForNope._qk_tensor_cache=torch.load(rope_cfg["qk_tensor_path"])
+        IndexForNope._qk_tensor_path=rope_cfg["qk_tensor_path"]
         modeling_llama.LlamaAttention.forward = custom_forward_LlamaAttention
         modeling_llama.LlamaFlashAttention2.forward = (
             custom_forward_LlamaFlashAttention2

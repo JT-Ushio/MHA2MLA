@@ -3,10 +3,10 @@ TrainingArguments:
   seed: 42
   max_steps: 2000
   report_to: wandb
-  run_name: rope_v4_topk4_ae_v2_rank8_silu_init_lr1e-3
+  run_name: rope_v4_topk4_ae_v2_rank8_tanh_init_lr1e-3
   save_strategy : steps
   save_steps: 0.5
-  output_dir: ../checkpoints/rope_v4_topk4_ae_v2_rank8_silu_init
+  output_dir: ../checkpoints/test
   overwrite_output_dir: true
   logging_strategy: steps
   logging_steps: 10
@@ -102,7 +102,7 @@ ModelConfig:
   AE:
     version: 2
     low_rank: 8
-    activation_fn: silu
+    activation_fn: tanh
 
 # 关注
 # run_name

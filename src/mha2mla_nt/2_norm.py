@@ -446,7 +446,7 @@ def main():
     )  # [n_layer][n_head][n_dim/2]
     key_states = torch.mean(key_states, dim=0, keepdim=False)
     # visualize(query_states, key_states)
-    qk_states = query_states + key_states
+    qk_states = query_states * key_states
     if qk_states.shape[1] != model.config.num_key_value_heads:
         layer_num, _, dim = query_states.shape
         qk_states = qk_states.view(

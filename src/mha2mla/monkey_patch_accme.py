@@ -1313,14 +1313,9 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
 
         # prepare q_nope
         q_nope = self.W_q_nope(hidden_states).reshape(bsz,q_len,self.num_heads,self.head_nope_dim).transpose(1,2) # [bsz,num_attention_heads,q_len,head_nope_dim]
-        if q_len == 1:
-            q_nope = torch.matmul(
-                q_nope.transpose(0, 2), self.q_absorb
-            ).transpose(0,2)
-        else:
-            q_nope = torch.matmul(
-                q_nope, self.q_absorb
-            )  # [bsz,num_attention_heads,q_len,num_key_value_heads*low_rank]
+        q_nope = torch.matmul(
+            q_nope, self.q_absorb
+        )  # [bsz,num_attention_heads,q_len,num_key_value_heads*low_rank]
 
         assert past_key_value is not None
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -1416,10 +1411,7 @@ class CustomLlamaMLAForInfer(CustomLlamaAttention):
             attn_weights, p=self.attention_dropout, training=self.training
         )
         attn_output = torch.matmul(attn_weights, c_kv) # [bsz, num_attention_heads, q_len, low_rank * num_key_value_heads]
-        if q_len==1:
-            attn_output = torch.matmul(attn_output.transpose(0,2), self.o_absorb).transpose(0,2).reshape(bsz,q_len,self.num_heads*self.head_dim)
-        else:
-            attn_output = torch.matmul(attn_output, self.o_absorb).reshape(bsz,q_len,self.num_heads*self.head_dim)
+        attn_output = torch.matmul(attn_output, self.o_absorb).reshape(bsz,q_len,self.num_heads*self.head_dim)
         attn_output = self.o_proj(attn_output)
 
         return attn_output, None, past_key_value

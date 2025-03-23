@@ -176,6 +176,7 @@ wandb/
 /images
 /pj_scripts
 /scripts
+/log
 *.whl
 
 # debug setting
