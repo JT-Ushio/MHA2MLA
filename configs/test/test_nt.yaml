@@ -2,7 +2,7 @@ checkpoints:
   checkpoint_interval: 1800 # 保存检查点的步数间隔
   checkpoints_path: ../checkpoints/test_nt # 检查点保存的路径
   checkpoints_path_is_shared_file_system: false # 检查点路径是否在共享文件系统上
-  resume_checkpoint_path: ../checkpoints/test_nt # 恢复训练时的检查点路径
+  resume_checkpoint_path: /home/binguo/data/MLA-FT/checkpoints/v5_last8_rope/16200 # 恢复训练时的检查点路径
   save_final_state: false # 是否保存最终状态
   save_initial_state: false # 是否保存初始状态
   load_lr_scheduler: false
@@ -69,9 +69,9 @@ model:
     use_cache: true # 是否使用缓存
     vocab_size: 49152 # 词汇表大小
     # RoPE:
-    #   partial_rope_version: 4  # 0 1 2 3 4 5
-    #   top_k_rope_dim: 4
-    #   last_k_rope_dim: 0
+    #   partial_rope_version: 5  # 0 1 2 3 4 5
+    #   top_k_rope_dim: 0
+    #   last_k_rope_dim: 8
     #   uniform_start_point: 0
     #   uniform_step: 1
     #   qk_tensor_path: '../utils/qk_tensor_135M.pth'

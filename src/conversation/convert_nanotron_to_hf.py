@@ -4,8 +4,7 @@ Converts a nanotron model to HF format
 Command:
     torchrun --nproc_per_node=1 convert_nanotron_to_hf.py --checkpoint_path=nanotron-path --save_path=hf-path
 """
-
-import json
+import json,os
 from argparse import ArgumentParser
 from pathlib import Path
 from typing import Literal, Optional
@@ -147,18 +146,23 @@ if __name__ == "__main__":
     parser.add_argument("--is_mla", action="store_true", help="Whether the model is an MLA model")
     parser.add_argument("--auto_encoder", action="store_true", help="Whether the model is using auto-encoder")
     args = parser.parse_args()
+    with open(os.path.join(args.checkpoint_path,"model_config.json")) as f:
+        config = json.load(f)
+    if "RoPE" in config:
+        # partial RoPE
+        from ..mha2mla.monkey_patch import partial_rope_monkey_patch as partial_rope_monkey_patch_hf
+        from ..mha2mla_nt.monkey_patch import CustomLlamaConfig,partial_rope_monkey_patch as partial_rope_monkey_patch_nt
+        partial_rope_monkey_patch_hf(config["RoPE"])
+        partial_rope_monkey_patch_nt(config["RoPE"])
+        globals()["NanotronLlamaConfig"] = CustomLlamaConfig
     if args.is_mla:
-        import json,os
         from ..mha2mla.monkey_patch import mla_monkey_patch as mla_monkey_patch_hf
-        from ..mha2mla_nt.monkey_patch import mla_monkey_patch as mla_monkey_patch_nt,CustomLlamaConfig
-        from transformers import AutoConfig
+        from ..mha2mla_nt.monkey_patch import mla_monkey_patch as mla_monkey_patch_nt
         with open(os.path.join(args.checkpoint_path,"model_config.json")) as f:
             config = json.load(f)
         mla_monkey_patch_hf(config["RoPE"])
         mla_monkey_patch_nt(config["RoPE"])
-        globals()["NanotronLlamaConfig"] = CustomLlamaConfig
     if args.auto_encoder:
-        import json,os
         with open(os.path.join(args.checkpoint_path,"model_config.json")) as f:
             config = json.load(f)
         from ..auto_encoder.patch_func_hf import ae_patch_func_hf
@@ -167,10 +171,8 @@ if __name__ == "__main__":
         ae_patch_func_hf(config["RoPE"])
         globals()["NanotronLlamaConfig"] = CustomLlamaConfig
     if not args.is_mla and not args.auto_encoder:
-        from .original_convert_weights import get_config_mapping as original_get_config_mapping
         from .original_convert_weights import get_weight_mapping as original_get_weight_mapping
         from .original_convert_weights import load_nanotron_model as original_load_nanotron_model
-        get_config_mapping = original_get_config_mapping
         get_weight_mapping = original_get_weight_mapping
         load_nanotron_model = original_load_nanotron_model
     # Convert Nanotron model to HF format.
