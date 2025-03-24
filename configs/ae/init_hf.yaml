@@ -1,110 +1,64 @@
-TrainingArguments:
-  # general
-  seed: 42
-  max_steps: 2000
-  report_to: wandb
-  run_name: rope_v4_topk4_ae_v2_rank8_silu_init_lr1e-3
-  save_strategy : steps
-  save_steps: 0.5
-  output_dir: ../checkpoints/rope_v4_topk4_ae_v2_rank8_silu_init
-  overwrite_output_dir: true
-  logging_strategy: steps
-  logging_steps: 10
-  resume_from_checkpoint: null
-  per_device_train_batch_size: 8
-  remove_unused_columns: False
-  gradient_accumulation_steps: 1
-  bf16: true
-  dataloader_drop_last: true
-  # optim
-  max_grad_norm: 1.0
-  learning_rate: 1.0e-3
-  weight_decay: 0.01
-  adam_beta1: 0.9
-  adam_beta2: 0.999
-  adam_epsilon: 1.0e-8
-  max_grad_norm: 1.0
-  lr_scheduler_type: "constant"
-# Optimizer:
-#   learning_rate_scheduler:
-#     learning_rate: 0.01 # 学习率
-#     lr_decay_starting_step: 2000 # 学习率衰减开始步数
-#     lr_decay_steps: 0 # 学习率衰减步数
-#     lr_decay_style: 1-sqrt # 学习率衰减风格
-#     lr_warmup_steps: 0 # 学习率预热步数
-#     lr_warmup_style: linear # 学习率预热风格
-#     min_decay_lr: 0 # 最小衰减学习率
-#   optimizer_factory:
-#     adam_beta1: 0.9 # Adam优化器的beta1参数
-#     adam_beta2: 0.95 # Adam优化器的beta2参数
-#     adam_eps: 1.0e-08 # Adam优化器的epsilon
-#     name: adamW # 优化器名称
-#     torch_adam_is_fused: true # 是否使用Torch的融合Adam
-#   weight_decay: 0.01 # 权重衰减
+# general
+seed: 42
+max_steps: 2000
+report_to: wandb
+run_name: rope_v4_topk4_ae_v2_rank8_tanh_init_lr1e-3
+save_strategy : steps
+save_steps: 0.5
+output_dir: ../checkpoints/rope_v4_topk4_ae_v2_rank8_tanh_init
+overwrite_output_dir: true
+logging_strategy: steps
+logging_steps: 10
+resume_from_checkpoint: null
+per_device_train_batch_size: 8
+remove_unused_columns: False
+gradient_accumulation_steps: 1
+bf16: true
+deepspeed: ../configs_hf/rope/ds_config.json
+dataloader_drop_last: true
+# optim
+optim: adamw_torch
+max_grad_norm: 1.0
+learning_rate: 1.0e-3
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_epsilon: 1.0e-8
+weight_decay: 0.01
+# lr scheduler
+use_constant_with_warmup_decay_scheduler: true
+lr_scheduler_kwargs: {"lr_decay_starting_step": 1000, "lr_decay_steps": lr_decay_steps, "lr_decay_style": "1-sqrt", "lr_warmup_steps": 200, "lr_warmup_style": "linear", "min_decay_lr": 0}
 
 
 # model
-ModelArguments:
-  dtype: bfloat16
-  model_name_or_path: ~/data/models/HuggingFaceTB/SmolLM-135M
-  tokenizer_name_or_path: ~/data/models/HuggingFaceTB/SmolLM-135M
-
+model_name_or_path: ~/data/models/HuggingFaceTB/SmolLM-135M
+tokenizer_name_or_path: ~/data/models/HuggingFaceTB/SmolLM-135M
 
 # dataset
-DataArguments:
-  dataset_folders: # 数据集的路径列表
-    - ~/local/smollm1_corpus/fineweb-edu-dedup/
-    - ~/local/smollm1_corpus/cosmopedia-v2/
-    - ~/local/smollm1_corpus/python-edu/
-    - ~/local/smollm1_corpus/open-web-math/
-    - ~/local/smollm1_corpus/stackoverflow/
-  dataset_weights: # 各数据集的权重
-    - 0.7
-    - 0.15
-    - 0.08
-    - 0.06
-    - 0.01
-  sequence_length: 2048
-  DP: 1
+is_nanoset: true
+dataset_folders:
+  - ~/local/smollm1_corpus/fineweb-edu-dedup/
+  - ~/local/smollm1_corpus/cosmopedia-v2/
+  - ~/local/smollm1_corpus/python-edu/
+  - ~/local/smollm1_corpus/open-web-math/
+  - ~/local/smollm1_corpus/stackoverflow/
+dataset_weights: # 各数据集的权重
+  - 0.7
+  - 0.15
+  - 0.08
+  - 0.06
+  - 0.01
+sequence_length: 2048
 
 # model config
-ModelConfig:
-  attention_bias: false
-  attention_dropout: 0.0
-  bos_token_id: 0
-  eos_token_id: 0
-  hidden_act: silu
-  hidden_size: 576
-  initializer_range: 0.02
-  intermediate_size: 1536
-  max_position_embeddings: 2048
-  mlp_bias: false
-  model_type: llama
-  num_attention_heads: 9
-  num_hidden_layers: 30
-  num_key_value_heads: 3
-  pretraining_tp: 1
-  rms_norm_eps: 1e-05
-  rope_scaling: null
-  rope_theta: 10000.0
-  tie_word_embeddings: true
-  torch_dtype: bfloat16
-  use_cache: true
-  vocab_size: 49152
-  RoPE:
-    partial_rope_version: 4  # 0 1 2 3 4 5
-    top_k_rope_dim: 4
-    last_k_rope_dim: 0
-    uniform_start_point: 0
-    uniform_step: 1
-    qk_tensor_path: '../utils/qk_tensor_135M.pth'
-    n_gqa_group: 3
-  AE:
-    version: 2
-    low_rank: 8
-    activation_fn: silu
-
-# 关注
-# run_name
-# output_dir
-# global_batch_size = DP * per_device_train_batch_size * gradient_accumulation_steps = 64
+RoPE:
+  partial_rope_version: 4  # 0 1 2 3 4 5
+  top_k_rope_dim: 4
+  last_k_rope_dim: 0
+  uniform_start_point: 0
+  uniform_step: 1
+  qk_tensor_path: '../utils/qk_tensor_135M.pth'
+  n_gqa_group: 3
+AE:
+  version: 2
+  low_rank: 8
+  activation_fn: tanh

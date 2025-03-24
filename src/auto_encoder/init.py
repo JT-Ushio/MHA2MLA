@@ -1,6 +1,7 @@
 import torch
-from transformers import AutoTokenizer, AutoModel, Trainer, TrainingArguments
-from transformers import LlamaConfig, LlamaForCausalLM, AutoModelForCausalLM,PreTrainedModel
+from dataclasses import dataclass
+from transformers import AutoTokenizer, AutoModel, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
+from transformers import LlamaConfig, LlamaForCausalLM, AutoModelForCausalLM,PreTrainedModel,DataCollatorForLanguageModeling
 from transformers.models.llama import modeling_llama
 from nanotron.data.nanoset import Nanoset
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock, TensorPointer
@@ -14,7 +15,17 @@ import yaml
 import torch
 
 
-from ..mha2mla.lr_scheduler import load_optimizer_scheduler
+from ..mha2mla.run_train import DataArguments,load_optimizer_scheduler
+
+@dataclass
+class ModelArguments:
+    model_name_or_path: str = None
+    tokenizer_name_or_path: str = None
+    save_initial_model: bool = False
+    use_constant_with_warmup_decay_scheduler: bool = False
+    RoPE: dict = None
+    AE: dict = None
+
 
 TYPE_DICT = {
     "float32": torch.float32,
@@ -140,14 +151,13 @@ def load_config(config_path):
     with open(config_path, "r") as file:
         return yaml.safe_load(file)
 
-def load_tokenizer_and_model(model_arguments, model_config):
+def load_tokenizer_and_model(model_arguments):
     """Load tokenizer and model from configuration."""
     # model
-    dtype = TYPE_DICT[model_arguments["dtype"]]
+    model_config = AutoConfig.from_pretrained(model_arguments["model_name_or_path"])
     model_name_or_path = model_arguments["model_name_or_path"]
-    model_config = LlamaConfig(**model_config)
     if model_name_or_path is not None:
-        model = LlamaForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype)
+        model = LlamaForCausalLM.from_pretrained(model_name_or_path)
     else:
         model = LlamaForCausalLM(model_config)
     # tokenizer
@@ -177,27 +187,33 @@ class CustomNanoset(Nanoset):
         return item
 
 
-def load_dataset(config, tokenizer):
+def load_dataset(dataset_args, training_args, tokenizer):
     """Load dataset from configuration."""
-    data_arguments = config["DataArguments"]
-    dataset_folders = data_arguments["dataset_folders"]
-    dataset_weights = data_arguments["dataset_weights"]
-    sequence_length = data_arguments["sequence_length"]
-    traingingargs = TrainingArguments(**config["TrainingArguments"])
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
-    global_batch_size = (
-        traingingargs.per_device_train_batch_size
-        * world_size
-        * traingingargs.gradient_accumulation_steps
-    )
-    dataset = CustomNanoset(
-        dataset_folders=dataset_folders,
-        sequence_length=sequence_length,
-        dataset_weights=dataset_weights,
-        token_size=token_size,
-        train_split_num_samples=global_batch_size * traingingargs.max_steps,
-    )
+    tokenizer.model_max_length = dataset_args.sequence_length
+    if dataset_args.is_nanoset:
+        dataset_folders = dataset_args.dataset_folders
+        dataset_weights = dataset_args.dataset_weights
+        sequence_length = dataset_args.sequence_length
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
+        global_batch_size = (
+            training_args.per_device_train_batch_size
+            * world_size
+            * training_args.gradient_accumulation_steps
+        )
+        dataset = CustomNanoset(
+            dataset_folders=dataset_folders,
+            sequence_length=sequence_length,
+            dataset_weights=dataset_weights,
+            token_size=token_size,
+            train_split_num_samples=global_batch_size * training_args.max_steps,
+        )
+    else:
+        import datasets
+        dataset = datasets.load_dataset(
+            dataset_args.dataset_name_or_path, split="train"
+        )
+
     return dataset
 
 
@@ -213,27 +229,34 @@ def main():
     )
     args = parser.parse_args()
     config = load_config(args.config_file)
-    assert config["DataArguments"]["DP"] == int(os.environ.get("WORLD_SIZE", 1)), "DP is not equal to WORLD_SIZE"
-
+    hf_parser = HfArgumentParser((TrainingArguments, ModelArguments, DataArguments))
+    training_args, model_args, data_args = hf_parser.parse_dict(config)
     # Trainer
     model, tokenizer = load_tokenizer_and_model(
-        config["ModelArguments"], config["ModelConfig"]
+        model_args,
     )
-    train_dataset = load_dataset(config, tokenizer)
-    resume_from_checkpoint = config["TrainingArguments"]["resume_from_checkpoint"]
-    training_args = TrainingArguments(**config["TrainingArguments"])
-    optimizer, lr_scheduler = load_optimizer_scheduler(model, config)
+    train_dataset = load_dataset(data_args, training_args, tokenizer)
+    resume_from_checkpoint = training_args.resume_from_checkpoint
+    optimizer, lr_scheduler = load_optimizer_scheduler(model, training_args, model_args)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        return_tensors="pt",
+    )
     trainer = Trainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
         optimizers=(optimizer, lr_scheduler),
+        data_collator=data_collator,
     )
     # train
     if resume_from_checkpoint is not None:
         trainer.train(resume_from_checkpoint)
     else:
+        if int(os.getenv("LOCAL_RANK", 0)) == 0 and model_args.save_initial_model:
+            trainer._save_checkpoint()
         trainer.train()
 
 if __name__ == "__main__":
