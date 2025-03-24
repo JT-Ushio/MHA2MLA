@@ -94,7 +94,7 @@ For the MLA evaluation, you can use the following command:
 
 ```sh
 accelerate launch --multi_gpu --num_processes=4 \
-    ../src/mha2mla/eval.py --partial_rope_config ${cfg_RoPE} --is_mla \
+    ../src/mha2mla/eval.py --is_mla \
     accelerate \
     --model_args "pretrained=${model_name_or_path},revision=main,dtype=bfloat16,max_length=2048" \
     --override_batch_size 48 \
@@ -102,6 +102,7 @@ accelerate launch --multi_gpu --num_processes=4 \
     --tasks "../src/mha2mla/smollm1_base.txt" \
     --output_dir "../eval_results/"
 ```
+> If you want to evaluate the `partial_rope` ckpt without `low rank approx`, you should change `--is_mla` to `--is_partial_rope`.
 
 ## LongBench Evaluation
 

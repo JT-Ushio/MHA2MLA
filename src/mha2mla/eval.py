@@ -5,7 +5,7 @@ from pprint import pformat
 
 from lighteval.parsers import parser_accelerate, parser_baseline, parser_nanotron, parser_utils_tasks
 from lighteval.tasks.registry import Registry, taskinfo_selector
-import yaml
+import yaml,json
 
 
 CACHE_DIR = os.getenv("HF_HOME")
@@ -15,9 +15,8 @@ CACHE_DIR = os.getenv("HF_HOME")
 def cli_evaluate():  # noqa: C901
     parser = argparse.ArgumentParser(description="CLI tool for lighteval, a lightweight framework for LLM evaluation")
     parser.add_argument(
-        "--partial_rope_config",
-        type=str,
-        required=True,
+        "--is_partial_rope",
+        action="store_true",
         help="Path to the RoPE configuration file. This file should contain the partial-RoPE configuration.",
     )
     parser.add_argument(
@@ -33,24 +32,26 @@ def cli_evaluate():  # noqa: C901
     parser_accelerate(parser_a)
 
     args = parser.parse_args()
-
-    # Monkey patching for the partial rope
-    from monkey_patch import partial_rope_monkey_patch, mla_monkey_patch
-    with open(args.partial_rope_config,"r") as f:
-        cfg_RoPE = yaml.load(f, Loader=yaml.FullLoader)
-        if "RoPE" in cfg_RoPE:
-            cfg_RoPE=cfg_RoPE["RoPE"]
-    if args.is_mla:
-        mla_monkey_patch(cfg_RoPE)
-    else:
-        partial_rope_monkey_patch(cfg_RoPE)
+    if args.is_mla or args.is_partial_rope:
+        from monkey_patch import partial_rope_monkey_patch, mla_monkey_patch
+        model_args = args.model_args
+        model_args = {k.split("=")[0]: k.split("=")[1] if "=" in k else True for k in model_args.split(",")}
+        ckpt_path = model_args["pretrained"]
+        with open(os.path.join(ckpt_path,"config.json")) as f:
+            model_config = json.load(f)
+        cfg_RoPE = model_config["RoPE"]
+        assert not (args.is_mla and args.is_partial_rope), "Cannot set both is_mla and is_partial_rope to True."
+        if args.is_mla:
+            mla_monkey_patch(cfg_RoPE)
+        else:
+            partial_rope_monkey_patch(cfg_RoPE)
 
     if args.subcommand == "accelerate":
         from lighteval.main_accelerate import main as main_accelerate
 
         main_accelerate(args)
     else:
-        print("You did not provide any argument. Exiting")
+        print("You need to set the subcommand to 'accelerate'.")
 
 
 if __name__ == "__main__":

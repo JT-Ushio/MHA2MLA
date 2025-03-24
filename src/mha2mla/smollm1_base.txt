@@ -1,7 +1,6 @@
 custom|hellaswag|0|1
 custom|arc|0|1
 custom|piqa|0|1
-custom|trivia_qa|0|1
 custom|winogrande|0|1
 custom|openbook_qa|0|1
 custom|mmlu|0|1
