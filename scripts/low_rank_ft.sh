@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 #################### 环境变量 ####################
-export CUDA_VISIBLE_DEVICES='0'
+export CUDA_VISIBLE_DEVICES='0,1,2,3'
 export PYTHONPATH=..:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export MASTER_PORT="auto"
@@ -9,9 +9,9 @@ export WANDB_PROJECT="mla_smollm_ft_nt"
 
 #################### 任务执行 ####################
 
-torchrun --nproc_per_node 1 --master_port 24558 \
-    -m src.auto_encoder.init \
-    --config-file ../configs/ae/init_hf.yaml
+torchrun --nproc_per_node 4 --master_port 24558 \
+    ../src/auto_encoder/init.py \
+    --config_file ../configs/ae/init_hf.yaml
 
 
 # torchrun --nproc_per_node 1 --master_port 24558 \

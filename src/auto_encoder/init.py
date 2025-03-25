@@ -14,8 +14,7 @@ import importlib
 import yaml
 import torch
 
-
-from ..mha2mla.run_train import DataArguments,load_optimizer_scheduler
+from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
 
 @dataclass
 class ModelArguments:
@@ -25,6 +24,14 @@ class ModelArguments:
     use_constant_with_warmup_decay_scheduler: bool = False
     RoPE: dict = None
     AE: dict = None
+
+@dataclass
+class DataArguments:
+    is_nanoset: bool = False
+    dataset_folders: List[str] = None
+    dataset_weights: List[float] = None
+    dataset_name_or_path: str = None
+    sequence_length: int = 2048
 
 
 TYPE_DICT = {
@@ -37,7 +44,7 @@ class AttnForTraing(PreTrainedModel):
     config_class = LlamaConfig
     def __init__(self,config):
         super().__init__(config)
-        from .patch_func_hf import CustomLlamaSdpaAttention,CustomLlamaAttention
+        from patch_func_hf import CustomLlamaSdpaAttention,CustomLlamaAttention
         self.config = config
         self.model = torch.nn.ModuleList(
             [
@@ -106,6 +113,7 @@ class AttnForTraing(PreTrainedModel):
         self,
         input_ids: Union[torch.Tensor, TensorPointer],
         attention_mask: Union[torch.Tensor, TensorPointer],
+        **kwargs,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         self.inputs.clear()
         importlib.reload(modeling_llama)
@@ -154,14 +162,16 @@ def load_config(config_path):
 def load_tokenizer_and_model(model_arguments):
     """Load tokenizer and model from configuration."""
     # model
-    model_config = AutoConfig.from_pretrained(model_arguments["model_name_or_path"])
-    model_name_or_path = model_arguments["model_name_or_path"]
+    model_config = AutoConfig.from_pretrained(model_arguments.model_name_or_path)
+    model_config.RoPE = model_arguments.RoPE
+    model_config.AE = model_arguments.AE
+    model_name_or_path = model_arguments.model_name_or_path
     if model_name_or_path is not None:
         model = LlamaForCausalLM.from_pretrained(model_name_or_path)
     else:
         model = LlamaForCausalLM(model_config)
     # tokenizer
-    tokenizer_name_or_path = model_arguments["tokenizer_name_or_path"]
+    tokenizer_name_or_path = model_arguments.tokenizer_name_or_path
     if tokenizer_name_or_path is None:
         tokenizer_name_or_path = model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
@@ -171,6 +181,38 @@ def load_tokenizer_and_model(model_arguments):
     model.post_init(original_model)
     return model, tokenizer
 
+def load_optimizer_scheduler(model, training_args, model_args):
+    """Load optimizer and scheduler from configuration."""
+    optimizer_name = training_args.optim
+    if "adam" in optimizer_name:
+        optimizer = torch.optim.AdamW(
+            params=model.parameters(),
+            lr=training_args.learning_rate,
+            betas=(
+                training_args.adam_beta1,
+                training_args.adam_beta2,
+            ),
+            eps=training_args.adam_epsilon,
+            weight_decay=training_args.weight_decay,
+            fused=bool(training_args.optim=="adamw_torch_fused"),
+        )
+    else:
+        raise ValueError(
+            f"Unknown optimizer factory {optimizer_name}"
+        )
+    if model_args.use_constant_with_warmup_decay_scheduler:
+        lr_scheduler = load_scheduler4constant_with_warmup_decay(
+            optimizer, training_args
+        )
+    else:
+        from transformers import get_scheduler
+        lr_scheduler = get_scheduler(
+            training_args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=training_args.warmup_steps,
+            num_training_steps=training_args.max_steps,
+        )
+    return optimizer, lr_scheduler
 
 class CustomNanoset(Nanoset):
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:

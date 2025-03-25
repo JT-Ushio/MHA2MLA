@@ -77,6 +77,214 @@ class CustomConfig(nanotron.config.config.Config):
 
     model: CustomModelArgs
 
+class IndexForNope:
+    _qk_tensor_path = None
+    _qk_tensor_cache = None
+
+    @staticmethod
+    def get_index_for_nope_v0(rope_cfg, **kwargs):
+        head_dim = kwargs["head_dim"]
+        nope_mask = torch.zeros((head_dim), dtype=torch.bool)
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope_v1(rope_cfg, **kwargs):
+        keep_dim = rope_cfg["top_k_rope_dim"]
+        head_dim = kwargs["head_dim"]
+        if keep_dim <= 0:
+            nope_mask = torch.ones((head_dim), dtype=torch.bool)
+        elif keep_dim >= head_dim:
+            nope_mask = torch.zeros((head_dim), dtype=torch.bool)
+        else:
+            half = head_dim // 2
+            nope_mask = torch.ones((half), dtype=torch.bool)
+            nope_mask[:keep_dim] = False
+            nope_mask = torch.cat([nope_mask, nope_mask], dim=0)
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope_v2(rope_cfg, **kwargs):
+        head_dim = kwargs["head_dim"]
+        indices_to_remove = torch.arange(
+            rope_cfg["uniform_start_point"], head_dim, rope_cfg["uniform_step"]
+        )
+        nope_mask = torch.ones(head_dim, dtype=torch.bool)
+        nope_mask[indices_to_remove] = False
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope_v3(rope_cfg, **kwargs):
+        head_dim = kwargs["head_dim"]
+        top_k_dim, last_k_dim = rope_cfg["top_k_rope_dim"], rope_cfg["last_k_rope_dim"]
+        half = head_dim // 2
+        assert top_k_dim + last_k_dim <= half
+        nope_mask = torch.zeros((half), dtype=torch.bool)
+        nope_mask[top_k_dim : half - last_k_dim] = True
+        nope_mask = torch.cat([nope_mask, nope_mask], dim=0)
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope_v4(rope_cfg, **kwargs):
+        if (
+            IndexForNope._qk_tensor_cache is None
+            or rope_cfg["qk_tensor_path"] != IndexForNope._qk_tensor_path
+        ):
+            with open(rope_cfg["qk_tensor_path"], "rb") as fin:
+                IndexForNope._qk_tensor_cache = torch.load(
+                    fin
+                )  # [layer_num, k_head_num, head_dim//2]
+                IndexForNope._qk_tensor_path = rope_cfg["qk_tensor_path"]
+                assert len(IndexForNope._qk_tensor_cache.shape) == 3
+        qk_tensor = IndexForNope._qk_tensor_cache
+        layer_idx = kwargs["layer_idx"]
+        top_k_dim = rope_cfg["top_k_rope_dim"]
+        topk_indices = torch.topk(qk_tensor[layer_idx], k=top_k_dim, dim=1)[1]
+        nope_mask = torch.ones_like(qk_tensor[layer_idx], dtype=torch.bool)
+        nope_mask.scatter_(1, topk_indices, False)
+        nope_mask = torch.cat([nope_mask, nope_mask], dim=-1)
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope_v5(rope_cfg, **kwargs):
+        head_dim = kwargs["head_dim"]
+        last_k_rope_dim = rope_cfg["last_k_rope_dim"]
+        half = head_dim // 2
+        nope_mask = torch.ones((half), dtype=torch.bool)
+        nope_mask[half - last_k_rope_dim : half] = False
+        nope_mask = torch.cat([nope_mask, nope_mask], dim=0)
+        return nope_mask
+
+    @staticmethod
+    def get_index_for_nope(rope_cfg, **kwargs):
+        logger.info(f"rope_cfg: {rope_cfg}")
+        version = rope_cfg["partial_rope_version"]
+        versions = {
+            0: IndexForNope.get_index_for_nope_v0,
+            1: IndexForNope.get_index_for_nope_v1,
+            2: IndexForNope.get_index_for_nope_v2,
+            3: IndexForNope.get_index_for_nope_v3,
+            4: IndexForNope.get_index_for_nope_v4,
+            5: IndexForNope.get_index_for_nope_v5,
+        }
+        index_func = versions[version]
+        nope_mask = index_func(rope_cfg, **kwargs)
+        nope_mask = nope_mask.to(dtype=torch.bool)
+        if version == 4:
+            nope_mask = nope_mask.reshape(-1)
+        else:
+            nope_mask = nope_mask.repeat(repeats=(kwargs["head_num"],))
+        return nope_mask
+
+
+class SvdInit:
+    @staticmethod
+    def method_I(k, v, r=8):
+        U_k, S_k, V_k = torch.svd(k)
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        U_v, S_v, V_v = torch.svd(v)
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        W_down = (U_k[:, :r] + U_v[:, :r]) / 2
+        W_up_k = torch.diag(S_k) @ V_k.t()
+        W_up_v = torch.diag(S_v) @ V_v.t()
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def method_II(k, v, r=8):
+        # Separately decompose W_k_nope and W_v into truncated SVDs, allocating dimensions to each
+        U_k, S_k, V_k = torch.svd(k)
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        U_v, S_v, V_v = torch.svd(v)
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        W_down_k = U_k
+        W_down_v = U_v
+        W_up_k = torch.diag(S_k) @ V_k.t()
+        W_up_v = torch.diag(S_v) @ V_v.t()
+        return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
+
+    @staticmethod
+    def method_III(k, v, r=8):
+        U_k, S_k, V_k = torch.svd(k)
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        U_v, S_v, V_v = torch.svd(v)
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        Sigma_k_half = torch.diag(torch.sqrt(S_k))
+        Sigma_v_half = torch.diag(torch.sqrt(S_v))
+        W_down_k = U_k @ Sigma_k_half
+        W_down_v = U_v @ Sigma_v_half
+        W_up_k = Sigma_k_half @ V_k.t()
+        W_up_v = Sigma_v_half @ V_v.t()
+        return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
+
+    @staticmethod
+    def method_IV(k, v, r=8):
+        U_k, S_k, V_k = torch.svd(k)
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        U_v, S_v, V_v = torch.svd(v)
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        Sigma_k_half = torch.diag(torch.sqrt(S_k))
+        Sigma_v_half = torch.diag(torch.sqrt(S_v))
+        W_down_k = U_k @ Sigma_k_half
+        W_down_v = U_v @ Sigma_v_half
+        W_down = (W_down_k + W_down_v) / 2
+        W_up_k = Sigma_k_half @ V_k.t()
+        W_up_v = Sigma_v_half @ V_v.t()
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def method_V(k, v, r=8):
+        U_k, S_k, V_k = torch.svd(k)
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        W_down = U_k
+        W_down_pseudo_inv = torch.linalg.pinv(W_down)
+        W_up_k = torch.diag(S_k) @ V_k.t()
+        W_up_v = torch.matmul(W_down_pseudo_inv, v)
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def method_VI(k, v, r=8):
+        U_v, S_v, V_v = torch.svd(v)
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        W_down = U_v
+        W_down_pseudo_inv = torch.linalg.pinv(W_down)
+        W_up_k = torch.matmul(W_down_pseudo_inv, k)
+        W_up_v = torch.diag(S_v) @ V_v.t()
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def method_VII(k, v, r=8):
+        # jointly factorize the con-catenated matrix
+        U_kv, S_kv, V_kv = torch.svd(torch.cat([k, v], dim=1))
+        U_kv, S_kv, V_kv = U_kv[:, :r], S_kv[:r], V_kv[:, :r]
+        W_down = U_kv
+        split_sizes = [k.size(1), v.size(1)]
+        W_up_k, W_up_v = torch.split(V_kv, split_sizes, dim=0)
+        W_up_k = torch.diag(S_kv) @ W_up_k.t()
+        W_up_v = torch.diag(S_kv) @ W_up_v.t()
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def init(k, v, svd_method=1, r=8):
+        assert k.dtype == v.dtype, "k and v must have the same dtype"
+        logger.info(f"Using SVD method {svd_method} with rank {r}")
+        original_dtype = k.dtype
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        versions = {
+            1: SvdInit.method_I,
+            2: SvdInit.method_II,
+            3: SvdInit.method_III,
+            4: SvdInit.method_IV,
+            5: SvdInit.method_V,
+            6: SvdInit.method_VI,
+            7: SvdInit.method_VII,
+        }
+        W_down_k, W_up_k, W_down_v, W_up_v = versions[svd_method](k, v, r)
+        W_down_k = W_down_k.to(original_dtype)
+        W_up_k = W_up_k.to(original_dtype)
+        if W_down_v is not None:
+            W_down_v = W_down_v.to(original_dtype)
+        W_up_v = W_up_v.to(original_dtype)
+        return W_down_k, W_up_k, W_down_v, W_up_v
 
 class AutoEncoderV1(nn.Module):
     # Low-rank decomposition of k_nope and v without sharing cache.

@@ -47,6 +47,7 @@ except ImportError:
 
 logger = logging.get_logger(__name__)
 
+from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
 
 def get_dataloader_from_data_stage(
     trainer: DistributedTrainer,
@@ -257,7 +258,7 @@ if __name__ == "__main__":
     config_file = args.config_file
 
     # Monkey patch
-    from .patch_func_nt import ae_patch_func_nt,CustomConfig
+    from patch_func_nt import ae_patch_func_nt,CustomConfig
     import yaml
     with open(config_file, "r") as fin:
         config = yaml.safe_load(fin)
