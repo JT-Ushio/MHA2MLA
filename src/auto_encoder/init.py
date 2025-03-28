@@ -1,18 +1,29 @@
 import torch
 from dataclasses import dataclass
-from transformers import AutoTokenizer, AutoModel, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
+from transformers import AutoTokenizer, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
 from transformers import LlamaConfig, LlamaForCausalLM, AutoModelForCausalLM,PreTrainedModel,DataCollatorForLanguageModeling
 from transformers.models.llama import modeling_llama
 from nanotron.data.nanoset import Nanoset
-from nanotron.parallel.pipeline_parallel.block import PipelineBlock, TensorPointer
+from nanotron.parallel.pipeline_parallel.block import TensorPointer
 import os
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
 from nanotron.logging import warn_once
 import logging
 import importlib
 import yaml
 import torch
+from accelerate import __version__ as accelerate_version
+from packaging import version
+from transformers.trainer_pt_utils import remove_dummy_checkpoint
+
+from transformers.utils import (
+    SAFE_WEIGHTS_NAME,
+    WEIGHTS_NAME,
+    is_sagemaker_mp_enabled,
+    is_torch_xla_available,
+    logging,
+)
 
 from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
 
@@ -24,6 +35,7 @@ class ModelArguments:
     use_constant_with_warmup_decay_scheduler: bool = False
     RoPE: dict = None
     AE: dict = None
+    save_in_nt_format: bool = False
 
 @dataclass
 class DataArguments:
@@ -39,6 +51,51 @@ TYPE_DICT = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
 }
+
+def CustomTrainer(Trainer):
+    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
+        """
+        Will save the model, so you can reload it using `from_pretrained()`.
+
+        Will only save from the main process.
+        """
+
+        if output_dir is None:
+            output_dir = self.args.output_dir
+
+        if is_torch_xla_available():
+            raise NotImplementedError("Saving auto-encoder is not supported with XLA.")
+        elif is_sagemaker_mp_enabled():
+            raise NotImplementedError("Saving auto-encoder is not supported with sagemaker_mp.")
+        elif self.is_fsdp_enabled:
+            if ("FULL_STATE_DICT" in str(self.accelerator.state.fsdp_plugin.state_dict_type)) and (
+                version.parse(accelerate_version) > version.parse("0.24.1")
+            ):
+                state_dict = self.accelerator.get_state_dict(self.model)
+                if self.args.should_save:
+                    self._save(output_dir, state_dict=state_dict)
+        elif self.is_deepspeed_enabled:
+            try:
+                state_dict = self.accelerator.get_state_dict(self.deepspeed)
+                if self.args.should_save:
+                    self._save(output_dir, state_dict=state_dict)
+            except ValueError:
+                if self.args.should_save:
+                    self._save(output_dir, state_dict={})
+                # remove the dummy state_dict
+                remove_dummy_checkpoint(self.args.should_save, output_dir, [WEIGHTS_NAME, SAFE_WEIGHTS_NAME])
+                self.model_wrapped.save_checkpoint(output_dir)
+
+        elif self.args.should_save:
+            state_dict = self.model.state_dict()
+        
+        if self.args.should_save:
+            state_dict = {key: value for key, value in state_dict.items() if "self_attn" in key}
+            self._save(output_dir,state_dict)
+
+        # Push to the Hub when `save_model` is called by the user.
+        if self.args.push_to_hub and not _internal_call:
+            self.push_to_hub(commit_message="Model save")
 
 class AttnForTraing(PreTrainedModel):
     config_class = LlamaConfig
@@ -285,7 +342,7 @@ def main():
         mlm=False,
         return_tensors="pt",
     )
-    trainer = Trainer(
+    trainer = CustomTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,

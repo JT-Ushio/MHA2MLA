@@ -13,7 +13,7 @@ from ..conversation.convert_nanotron_to_hf import get_hf_config,convert_nt_to_hf
 from ..conversation.convert_hf_to_nanotron import convert_hf_to_nt
 from .init import AttnForTraing
 
-def merge(original_model_path:str,ae_model_path:str,save_path:str):
+def merge(original_model_path:str,ae_model_path:str,save_path:str,save_in_nt_format:bool=False):
     from .patch_func_hf import ae_patch_func_hf
     from .patch_func_nt import ae_patch_func_nt,CustomLlamaConfig
     import json
@@ -48,25 +48,30 @@ def merge(original_model_path:str,ae_model_path:str,save_path:str):
                 layer.self_attn.auto_encoder.W_down_v.weight.data[:] = attn.auto_encoder.W_down_v.weight.detach()
                 layer.self_attn.auto_encoder.W_up_v.weight.data[:] = attn.auto_encoder.W_up_v.weight.detach()
     del model
-    # convert hf to nt
-    convert_hf_to_nt(original_model_hf, original_model_nt, model_config)
-    del original_model_hf
     # save nt model
-    parallel_context = nanotron.parallel.ParallelContext(
-        data_parallel_size=1, pipeline_parallel_size=1, tensor_parallel_size=1
-    )
-    nanotron.serialize.save_weights(model=original_model_nt, parallel_context=parallel_context, root_folder=Path(save_path))
-    with open(Path(save_path) / "model_config.json", "w+") as f:
-        json.dump(dataclasses.asdict(model_config), f)
-    print(f"Model saved to {save_path}")
+    if save_in_nt_format:
+        # convert hf to nt
+        convert_hf_to_nt(original_model_hf, original_model_nt, model_config)
+        del original_model_hf
+        parallel_context = nanotron.parallel.ParallelContext(
+            data_parallel_size=1, pipeline_parallel_size=1, tensor_parallel_size=1
+        )
+        nanotron.serialize.save_weights(model=original_model_nt, parallel_context=parallel_context, root_folder=Path(save_path))
+        with open(Path(save_path) / "model_config.json", "w+") as f:
+            json.dump(dataclasses.asdict(model_config), f)
+        print(f"NT format model saved to {save_path}")
+    else:
+        original_model_hf.save_pretrained(save_path)
+        print(f"HF format model saved to {save_path}")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--original_model_path",type=str,required=True)
     parser.add_argument("--ae_model_path",type=str,required=True)
     parser.add_argument("--save_path",type=str,required=True)
+    parser.add_argument("--save_in_nt_format",action="store_true")
     args = parser.parse_args()
-    merge(args.original_model_path,args.ae_model_path,args.save_path)
+    merge(args.original_model_path,args.ae_model_path,args.save_path,args.save_in_nt_format)
 
 if __name__ =="__main__":
     main()
