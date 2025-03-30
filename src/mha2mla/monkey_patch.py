@@ -1482,62 +1482,6 @@ def state_dict_svd_init(model, state_dict):
         )
     return state_dict
 
-@classmethod
-def custom_load_pretrained_model(
-    cls,
-    model,
-    state_dict,
-    loaded_keys,
-    resolved_archive_file,
-    pretrained_model_name_or_path,
-    ignore_mismatched_sizes=False,
-    sharded_metadata=None,
-    _fast_init=True,
-    low_cpu_mem_usage=False,
-    device_map=None,
-    offload_folder=None,
-    offload_state_dict=None,
-    dtype=None,
-    hf_quantizer=None,
-    keep_in_fp32_modules=None,
-    gguf_path=None,
-    weights_only=True,
-):
-    is_svd_init = False
-    if state_dict is not None:
-        is_svd_init = bool(
-            all(["W_k_r" not in k for k in state_dict.keys()])
-            and any(["W_k_r" in k for k in model.state_dict().keys()])
-        )  # weather the the model is initialized by SVD
-    if is_svd_init:
-        # replace the original llama weights with the mla weights
-        state_dict = state_dict_svd_init(model, state_dict)
-        loaded_keys = list(state_dict.keys())
-    import copy
-    old_k_r_weight = copy.deepcopy(model.model.layers[0].self_attn.W_k_r.weight)
-    outputs = cls.original_load_pretrained_model(
-        model,
-        state_dict,
-        loaded_keys,
-        resolved_archive_file,
-        pretrained_model_name_or_path,
-        ignore_mismatched_sizes,
-        sharded_metadata,
-        _fast_init,
-        low_cpu_mem_usage,
-        device_map,
-        offload_folder,
-        offload_state_dict,
-        dtype,
-        hf_quantizer,
-        keep_in_fp32_modules,
-        gguf_path,
-        weights_only,
-    )
-    new_k_r_weight = model.model.layers[0].self_attn.W_k_r.weight
-    if is_svd_init:
-        assert not (old_k_r_weight == new_k_r_weight).all()
-    return outputs
 
 def partial_rope_monkey_patch(rope_cfg):
     """
@@ -1567,15 +1511,6 @@ def mla_monkey_patch(rope_cfg=None):
         "sdpa": CustomLlamaSdpaAttention,
     }
 
-    if not hasattr(
-        modeling_llama.LlamaPreTrainedModel, "original_load_pretrained_model"
-    ):
-        modeling_llama.LlamaPreTrainedModel.original_load_pretrained_model = (
-            modeling_llama.LlamaPreTrainedModel._load_pretrained_model
-        )
-        modeling_llama.LlamaPreTrainedModel._load_pretrained_model = (
-            custom_load_pretrained_model
-        )
 
     if rope_cfg is not None:
         partial_rope_monkey_patch(rope_cfg)
