@@ -25,11 +25,11 @@ For the MLA model, you should add the parameter `--is_mla` to the command.
 
 ## MHA2MLA Fine-Tuning
 
-First, prepare a configuration file that can refer to the [MLA-FT configuration](./configs/mla/rope_v4_topk4_svd_method7_rank16.yaml). Then, use the following command for MLA fine-tuning:
+First, prepare a configuration file that can refer to the [MLA-FT configuration](../../configs/mla/rope_v4_topk4_svd_method7_rank16.yaml). Then, use the following command for MLA fine-tuning:
 
 ```bash
 torchrun --nproc_per_node 4 \
-    -m src.mla_train_nt \
+    ../src/mha2mla_nt/run_train.py \
     --config-file ../configs/mla/rope_v4_topk4_svd_method7_rank16.yaml
 ```
 

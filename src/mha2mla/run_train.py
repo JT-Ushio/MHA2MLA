@@ -88,12 +88,22 @@ def load_tokenizer_and_model(model_args: ModelArguments,is_mla:bool=False,mla_kw
     if model_args.tokenizer_name_or_path is None:
         model_args.tokenizer_name_or_path = model_args.model_name_or_path
     config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
+    original_model = mla_kwargs["original_model"]
     if is_mla:
+        # prepare instance of mla model
         cfg_RoPE = mla_kwargs.get("RoPE")
         cfg_SVD = mla_kwargs.get("SVD")
         config.RoPE = cfg_RoPE
         config.SVD = cfg_SVD
-    model = LlamaForCausalLM.from_pretrained(model_args.model_name_or_path,config=config)
+        model = LlamaForCausalLM(config=config)
+        # svd init
+        from monkey_patch import state_dict_svd_init
+        model.load_state_dict(
+            state_dict_svd_init(model,original_model.state_dict()),
+        )
+    else:
+        # directly return the original model
+        model = original_model
     tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -161,6 +171,7 @@ def main():
     cfg_RoPE = load_config(args.partial_rope_config)
     parser = HfArgumentParser((TrainingArguments, ModelArguments,DataArguments))
     training_args, model_args, dataset_args = parser.parse_dict(config)
+    original_model = LlamaForCausalLM.from_pretrained(model_args.model_name_or_path)
 
     # Monkey Pacth
     if is_mla:
@@ -175,7 +186,7 @@ def main():
         cfg_SVD = load_config(args.svd_config)
     else:
         cfg_SVD = None
-    model, tokenizer = load_tokenizer_and_model(model_args,is_mla=is_mla,mla_kwargs={"RoPE":cfg_RoPE,"SVD":cfg_SVD})
+    model, tokenizer = load_tokenizer_and_model(model_args,is_mla=is_mla,mla_kwargs={"RoPE":cfg_RoPE,"SVD":cfg_SVD,"original_model":original_model})
     if training_args.bf16:
         model = model.to(dtype=torch.bfloat16)
     elif training_args.fp16:
