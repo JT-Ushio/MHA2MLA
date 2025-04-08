@@ -14,7 +14,7 @@ per_device_train_batch_size: 4
 remove_unused_columns: False
 gradient_accumulation_steps: 4
 bf16: true
-deepspeed: ../configs_hf/rope/ds_config.json
+deepspeed: cfgs/ds_zero_2.json
 dataloader_drop_last: true
 # optim
 optim: adamw_torch
@@ -29,8 +29,7 @@ use_constant_with_warmup_decay_scheduler: true
 lr_scheduler_kwargs: {"lr_decay_starting_step": 16200, "lr_decay_steps": 1800, "lr_decay_style": "1-sqrt", "lr_warmup_steps": 900, "lr_warmup_style": "linear", "min_decay_lr": 0}
 
 # ModelArguments
-model_name_or_path: /home/binguo/data/models/HuggingFaceTB/SmolLM-135M
-tokenizer_name_or_path: /home/binguo/data/models/HuggingFaceTB/SmolLM-135M
+model_name_or_path: HuggingFaceTB/SmolLM-135M
 
 # DataArguments
 is_nanoset: true

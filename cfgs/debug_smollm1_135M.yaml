@@ -10,17 +10,9 @@ data_stages:
 - data:
     dataset:
       dataset_folder: # paths to tokenized datasets
-        # - ~/public/corpus/smollm1_corpus/fineweb-edu-dedup
-        # - ~/public/corpus/smollm1_corpus/cosmopedia-v2
         - ~/public/corpus/smollm1_corpus/python-edu
-        # - ~/public/corpus/smollm1_corpus/open-web-math
-        # - ~/public/corpus/smollm1_corpus/stackoverflow
       dataset_weights:
-        # - 0.7
-        # - 0.15
-        - 1.0 # - 0.08
-        # - 0.06
-        # - 0.01
+        - 1.0
     num_loading_workers: 1
     seed: 42
   name: training stage

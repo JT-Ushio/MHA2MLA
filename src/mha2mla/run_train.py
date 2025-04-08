@@ -1,35 +1,15 @@
-from dataclasses import dataclass
 import torch
 from transformers import AutoTokenizer, AutoModel, Trainer, TrainingArguments
 from transformers import LlamaConfig, LlamaForCausalLM, AutoModelForCausalLM
-from torch.utils.data import DataLoader
-import datasets
-from transformers.utils import is_datasets_available
-from transformers.trainer_utils import seed_worker
-from transformers import HfArgumentParser,DataCollatorForLanguageModeling
+from transformers import HfArgumentParser, DataCollatorForLanguageModeling
 from nanotron.data.nanoset import Nanoset
 import os
-from typing import Dict, List
+from typing import Dict
 import numpy as np
 import yaml
 
-from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
+from .lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
 
-
-@dataclass
-class ModelArguments:
-    model_name_or_path: str = None
-    tokenizer_name_or_path: str = None
-    save_initial_model: bool = False
-    use_constant_with_warmup_decay_scheduler: bool = False
-
-@dataclass
-class DataArguments:
-    is_nanoset: bool = False
-    dataset_folders: List[str] = None
-    dataset_weights: List[float] = None
-    dataset_name_or_path: str = None
-    sequence_length: int = 2048
 
 class CustomNanoset(Nanoset):
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
@@ -44,6 +24,7 @@ class CustomNanoset(Nanoset):
         """
         item = super().__getitem__(idx)
         return item
+
 
 def load_dataset(dataset_args, training_args, tokenizer):
     """Load dataset from configuration."""
@@ -68,11 +49,13 @@ def load_dataset(dataset_args, training_args, tokenizer):
         )
     else:
         import datasets
+
         dataset = datasets.load_dataset(
             dataset_args.dataset_name_or_path, split="train"
         )
 
     return dataset
+
 
 def load_config(config_path):
     """Load configuration from a YAML file."""
@@ -80,7 +63,9 @@ def load_config(config_path):
         return yaml.safe_load(file)
 
 
-def load_tokenizer_and_model(model_args: ModelArguments,is_mla:bool=False,mla_kwargs:Dict=None):
+def load_tokenizer_and_model(
+    model_args: ModelArguments, is_mla: bool = False, mla_kwargs: Dict = None
+):
     """Load tokenizer and model from configuration."""
     assert (
         model_args.model_name_or_path is not None
@@ -98,8 +83,9 @@ def load_tokenizer_and_model(model_args: ModelArguments,is_mla:bool=False,mla_kw
         model = LlamaForCausalLM(config=config)
         # svd init
         from monkey_patch import state_dict_svd_init
+
         model.load_state_dict(
-            state_dict_svd_init(model,original_model.state_dict()),
+            state_dict_svd_init(model, original_model.state_dict()),
         )
     else:
         # directly return the original model
@@ -122,18 +108,17 @@ def load_optimizer_scheduler(model, training_args, model_args):
             ),
             eps=training_args.adam_epsilon,
             weight_decay=training_args.weight_decay,
-            fused=bool(training_args.optim=="adamw_torch_fused"),
+            fused=bool(training_args.optim == "adamw_torch_fused"),
         )
     else:
-        raise ValueError(
-            f"Unknown optimizer factory {optimizer_name}"
-        )
+        raise ValueError(f"Unknown optimizer factory {optimizer_name}")
     if model_args.use_constant_with_warmup_decay_scheduler:
         lr_scheduler = load_scheduler4constant_with_warmup_decay(
             optimizer, training_args
         )
     else:
         from transformers import get_scheduler
+
         lr_scheduler = get_scheduler(
             training_args.lr_scheduler_type,
             optimizer=optimizer,
@@ -141,6 +126,7 @@ def load_optimizer_scheduler(model, training_args, model_args):
             num_training_steps=training_args.max_steps,
         )
     return optimizer, lr_scheduler
+
 
 def main():
     import argparse
@@ -169,16 +155,18 @@ def main():
     is_mla = args.svd_config is not None
     config = load_config(args.config_file)
     cfg_RoPE = load_config(args.partial_rope_config)
-    parser = HfArgumentParser((TrainingArguments, ModelArguments,DataArguments))
+    parser = HfArgumentParser((TrainingArguments, ModelArguments, DataArguments))
     training_args, model_args, dataset_args = parser.parse_dict(config)
     original_model = LlamaForCausalLM.from_pretrained(model_args.model_name_or_path)
 
     # Monkey Pacth
     if is_mla:
         from monkey_patch import mla_monkey_patch
+
         mla_monkey_patch(cfg_RoPE)
     else:
         from monkey_patch import partial_rope_monkey_patch
+
         partial_rope_monkey_patch(cfg_RoPE)
 
     # Trainer
@@ -186,13 +174,17 @@ def main():
         cfg_SVD = load_config(args.svd_config)
     else:
         cfg_SVD = None
-    model, tokenizer = load_tokenizer_and_model(model_args,is_mla=is_mla,mla_kwargs={"RoPE":cfg_RoPE,"SVD":cfg_SVD,"original_model":original_model})
+    model, tokenizer = load_tokenizer_and_model(
+        model_args,
+        is_mla=is_mla,
+        mla_kwargs={"RoPE": cfg_RoPE, "SVD": cfg_SVD, "original_model": original_model},
+    )
     if training_args.bf16:
         model = model.to(dtype=torch.bfloat16)
     elif training_args.fp16:
         model = model.to(dtype=torch.float16)
 
-    train_dataset = load_dataset(dataset_args, training_args , tokenizer)
+    train_dataset = load_dataset(dataset_args, training_args, tokenizer)
     resume_from_checkpoint = training_args.resume_from_checkpoint
     optimizer, lr_scheduler = load_optimizer_scheduler(model, training_args, model_args)
     data_collator = DataCollatorForLanguageModeling(

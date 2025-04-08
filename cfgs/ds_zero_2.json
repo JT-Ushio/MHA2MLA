@@ -6,12 +6,20 @@
         "enabled": true
     },
     "zero_optimization": {
-        "stage": 0
+        "stage": 2,
+        "allgather_partitions": true,
+        "allgather_bucket_size": 5e8,
+        "overlap_comm": true,
+        "reduce_scatter": true,
+        "reduce_bucket_size": 5e8,
+        "contiguous_gradients": true
     },
     "gradient_accumulation_fusion": true,
     "gradient_clipping": 1.0,
     "steps_per_print": 100,
     "wall_clock_breakdown": false,
     "dtype": "bf16",
-    "data_types": {"grad_accum_dtype": "fp32"}
+    "data_types": {
+        "grad_accum_dtype": "fp32"
+    }
 }
