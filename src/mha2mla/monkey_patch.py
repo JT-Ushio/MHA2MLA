@@ -635,7 +635,7 @@ class IndexForNope:
 
 class SvdInit:
     @staticmethod
-    def method_I(k, v, r=8):
+    def method_I(k, v, r=8, scaling_diag_matrix=None):
         U_k, S_k, V_k = torch.svd(k)
         U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
         U_v, S_v, V_v = torch.svd(v)
@@ -646,7 +646,7 @@ class SvdInit:
         return W_down.t(), W_up_k.t(), None, W_up_v.t()
 
     @staticmethod
-    def method_II(k, v, r=8):
+    def method_II(k, v, r=8, scaling_diag_matrix=None):
         # Separately decompose W_k_nope and W_v into truncated SVDs, allocating dimensions to each
         U_k, S_k, V_k = torch.svd(k)
         U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
@@ -659,7 +659,7 @@ class SvdInit:
         return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
 
     @staticmethod
-    def method_III(k, v, r=8):
+    def method_III(k, v, r=8, scaling_diag_matrix=None):
         U_k, S_k, V_k = torch.svd(k)
         U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
         U_v, S_v, V_v = torch.svd(v)
@@ -673,7 +673,7 @@ class SvdInit:
         return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
 
     @staticmethod
-    def method_IV(k, v, r=8):
+    def method_IV(k, v, r=8, scaling_diag_matrix=None):
         U_k, S_k, V_k = torch.svd(k)
         U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
         U_v, S_v, V_v = torch.svd(v)
@@ -688,7 +688,7 @@ class SvdInit:
         return W_down.t(), W_up_k.t(), None, W_up_v.t()
 
     @staticmethod
-    def method_V(k, v, r=8):
+    def method_V(k, v, r=8, scaling_diag_matrix=None):
         U_k, S_k, V_k = torch.svd(k)
         U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
         W_down = U_k
@@ -698,7 +698,7 @@ class SvdInit:
         return W_down.t(), W_up_k.t(), None, W_up_v.t()
 
     @staticmethod
-    def method_VI(k, v, r=8):
+    def method_VI(k, v, r=8, scaling_diag_matrix=None):
         U_v, S_v, V_v = torch.svd(v)
         U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
         W_down = U_v
@@ -708,7 +708,7 @@ class SvdInit:
         return W_down.t(), W_up_k.t(), None, W_up_v.t()
 
     @staticmethod
-    def method_VII(k, v, r=8):
+    def method_VII(k, v, r=8, scaling_diag_matrix=None):
         # jointly factorize the con-catenated matrix
         U_kv, S_kv, V_kv = torch.svd(torch.cat([k, v], dim=1))
         U_kv, S_kv, V_kv = U_kv[:, :r], S_kv[:r], V_kv[:, :r]
@@ -720,7 +720,46 @@ class SvdInit:
         return W_down.t(), W_up_k.t(), None, W_up_v.t()
 
     @staticmethod
-    def init(k, v, svd_method=1, r=8):
+    def method_VIII(k, v, r=8, scaling_diag_matrix=None):
+        # jointly factorize the con-catenated matrix with matrix rescaling
+        assert scaling_diag_matrix is not None, "Scaling matrix must be provided"
+        
+        # Get the inverse of scaling_diag_matrix
+        scaling_matrix_inv = torch.linalg.inv(scaling_diag_matrix.to(torch.float32))
+
+        # Multiply scaling_diag_matrix to weight matrices
+        k_scale = torch.matmul(k, scaling_diag_matrix.to(torch.float32))
+        v_scale = torch.matmul(v, scaling_diag_matrix.to(torch.float32))
+        
+        # Perform SVD on the scaled matrices
+        U_k, S_k, V_k = torch.svd(k_scale)
+        U_v, S_v, V_v = torch.svd(v_scale)
+        
+        # Truncate to target rank
+        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
+        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
+        
+        # Apply inverse scaling to V
+        V_k_scaled = torch.matmul(V_k, scaling_matrix_inv)
+        V_v_scaled = torch.matmul(V_v, scaling_matrix_inv)
+        
+        # Create sqrt of singular values
+        sqrt_S_k = torch.sqrt(torch.diag(S_k))
+        sqrt_S_v = torch.sqrt(torch.diag(S_v))
+        
+        # Fuse the SVD components
+        W_down_k = torch.matmul(U_k, sqrt_S_k)
+        W_up_k = torch.matmul(sqrt_S_k, V_k_scaled.t())
+        W_down_v = torch.matmul(U_v, sqrt_S_v)
+        W_up_v = torch.matmul(sqrt_S_v, V_v_scaled.t())
+        
+        # Use shared W_down if needed
+        W_down = (W_down_k + W_down_v) / 2
+        
+        return W_down.t(), W_up_k.t(), None, W_up_v.t()
+
+    @staticmethod
+    def init(k, v, svd_method=1, r=8, scaling_diag_matrix=None):
         assert k.dtype == v.dtype, "k and v must have the same dtype"
         logger.info(f"Using SVD method {svd_method} with rank {r}")
         original_dtype = k.dtype
@@ -734,8 +773,13 @@ class SvdInit:
             5: SvdInit.method_V,
             6: SvdInit.method_VI,
             7: SvdInit.method_VII,
+            8: SvdInit.method_VIII,
         }
-        W_down_k, W_up_k, W_down_v, W_up_v = versions[svd_method](k, v, r)
+        
+        method = versions[svd_method]
+        
+        # Handle methods that support scaling_diag_matrix
+        W_down_k, W_up_k, W_down_v, W_up_v = method(k, v, r)
         W_down_k = W_down_k.to(original_dtype)
         W_up_k = W_up_k.to(original_dtype)
         if W_down_v is not None:
