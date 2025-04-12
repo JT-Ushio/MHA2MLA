@@ -1,276 +1,200 @@
-"""
-Nanotron training script.
-
-Usage:
-```
-export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
-torchrun --nproc_per_node=8 run_train.py --config-file examples/config_tiny_llama.yaml
-```
-"""
-
-import argparse
-import yaml
-from typing import Dict, cast
-
-import numpy as np
-from nanotron import logging
-from nanotron.config import (
-    DataArgs,
-    DatasetStageArgs,
-    NanosetDatasetsArgs,
-    PretrainDatasetsArgs,
-)
-from nanotron.data.dataloader_builder import build_nanoset_dataloader
-from nanotron.dataloader import (
-    clm_process,
-    dummy_infinite_data_generator,
-    get_datasets,
-    get_train_dataloader,
-)
-from nanotron.helpers import (
-    compute_remain_train_steps_of_a_data_stage_from_ckp,
-    get_consumed_train_samples_of_a_data_stage_from_ckp,
-)
-from nanotron.logging import log_rank
-from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
-from nanotron.trainer import DistributedTrainer
-from nanotron.utils import main_rank_first
+from dataclasses import dataclass
+import torch
+from transformers import AutoTokenizer, Trainer, TrainingArguments
+from transformers import AutoConfig, AutoModelForCausalLM
 from torch.utils.data import DataLoader
-
-try:
-    from huggingface_hub import __version__ as hf_hub_version
-    from transformers import AutoTokenizer
-    from transformers import __version__ as tf_version
-except ImportError:
-    hf_hub_version = None
-    tf_version = None
-
-logger = logging.get_logger(__name__)
+import datasets
+from transformers.utils import is_datasets_available
+from transformers.trainer_utils import seed_worker
+from transformers import HfArgumentParser, DataCollatorForLanguageModeling
+from nanotron.data.nanoset import Nanoset
+import os
+from typing import Dict, List
+import numpy as np
+import yaml
 
 from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
 
-def get_dataloader_from_data_stage(
-    trainer: DistributedTrainer,
-    data: DataArgs,
-    consumed_train_samples: int,
-    num_remaining_train_steps: int,
-):
-    """
-    Returns a dataloader for a given data stage.
 
-    data: The data configuration for the current stage.
-    consumed_train_samples: The number of samples consumed by the model in the this stage (each stage starts from zero).
-    num_remaining_train_steps: The number of remaining training steps for this stage.
-    """
-    assert (
-        consumed_train_samples >= 0
-    ), "consumed_train_samples should be greater than 0"
-    assert (
-        num_remaining_train_steps >= 0
-    ), "num_remaining_train_steps should be greater than 0"
+@dataclass
+class CustomTrainingArguments(TrainingArguments):
+    use_constant_with_warmup_decay_scheduler: bool = False
 
-    # First, we need to know which ranks to feed the dataloader to
-    input_pp_rank, output_pp_rank = get_input_output_pp_ranks(model=trainer.model)
 
-    # Case 1: Dummy data generator
-    if data.dataset is None:
-        log_rank(
-            "Using dummy data generator", logger=logger, level=logging.INFO, rank=0
-        )
-        dataloader = dummy_infinite_data_generator(
-            micro_batch_size=trainer.micro_batch_size,
-            sequence_length=trainer.sequence_length,
-            input_pp_rank=input_pp_rank,
-            output_pp_rank=output_pp_rank,
-            vocab_size=trainer.model_config.vocab_size,
-            seed=data.seed,
-            parallel_context=trainer.parallel_context,
-        )()
+@dataclass
+class ModelArguments:
+    model_name_or_path: str = None
+    tokenizer_name_or_path: str = None
+    save_initial_model: bool = False
 
-    # Case 2: HuggingFace datasets
-    elif isinstance(data.dataset, PretrainDatasetsArgs):
-        log_rank("Using `datasets` library", logger=logger, level=logging.INFO, rank=0)
-        tokenizer_path = trainer.config.tokenizer.tokenizer_name_or_path
-        log_rank(
-            f"Loading tokenizer from {tokenizer_path} and transformers/hf_hub versions {tf_version, hf_hub_version}",
-            logger=logger,
-            level=logging.INFO,
-            rank=0,
-        )
 
-        # We need to the 1st device to process dataset and cache it, then other devices load from cache
-        with main_rank_first(trainer.parallel_context.world_pg):
-            # TODO @nouamanetazi: this may timeout before 1st device finishes processing dataset. Can we have a ctxmanager to modify timeout?
-            # TODO: generalise to include  for validation/test splits
+@dataclass
+class DataArguments:
+    is_nanoset: bool = False
+    dataset_folders: List[str] = None
+    dataset_weights: List[float] = None
+    dataset_name_or_path: str = None
+    sequence_length: int = 2048
 
-            # We load the raw dataset
-            raw_dataset = get_datasets(
-                hf_dataset_or_datasets=data.dataset.hf_dataset_or_datasets,
-                hf_dataset_config_name=data.dataset.hf_dataset_config_name,
-                splits=data.dataset.hf_dataset_splits,
-            )["train"]
 
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.padding_side = "left"
+class CustomNanoset(Nanoset):
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+        """
+        Returns sequence_length + 1 tokens from the memmap dataset
 
-            # Check that tokenizer's vocab size is smaller than the model's vocab size
-            assert (
-                tokenizer.vocab_size <= trainer.model_config.vocab_size
-            ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
+        Args:
+            idx (int): The index into the dataset
 
-            # We apply the Causal Language Modeling preprocessing
-            train_dataset = clm_process(
-                raw_dataset=raw_dataset,
-                tokenizer=tokenizer,
-                text_column_name=data.dataset.text_column_name,
-                dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
-                dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
-                sequence_length=trainer.sequence_length,
-            )
+        Returns:
+            Dict[str, torch.LongTensor]: The input ids wrapped in a dictionary
+        """
+        item = super().__getitem__(idx)
+        return item
 
-            # We load the processed dataset on the ranks requiring it
-            dataloader = get_train_dataloader(
-                train_dataset=train_dataset,
-                sequence_length=trainer.sequence_length,
-                parallel_context=trainer.parallel_context,
-                input_pp_rank=input_pp_rank,
-                output_pp_rank=output_pp_rank,
-                micro_batch_size=trainer.micro_batch_size,
-                consumed_train_samples=consumed_train_samples,
-                dataloader_num_workers=data.num_loading_workers,
-                seed_worker=data.seed,
-                dataloader_drop_last=True,
-            )
 
-            # Check if we have enough samples for train_steps
-            total_tokens_dataset = len(dataloader.dataset) * trainer.sequence_length
-            num_tokens_needed_for_training = (
-                num_remaining_train_steps
-                * trainer.global_batch_size
-                * trainer.sequence_length
-            )
-            assert num_tokens_needed_for_training <= total_tokens_dataset, (
-                f"Dataset is too small for steps ({total_tokens_dataset} < {num_tokens_needed_for_training}), "
-                f"Try train_steps<={len(dataloader.dataset) // trainer.global_batch_size + trainer.iteration_step}"
-            )
-
-    # Case 3: Nanosets
-    elif isinstance(data.dataset, NanosetDatasetsArgs):
-        # Get tokenizer cardinality
-        tokenizer = AutoTokenizer.from_pretrained(
-            trainer.config.tokenizer.tokenizer_name_or_path
-        )
+def load_dataset(dataset_args, training_args, tokenizer):
+    """Load dataset from configuration."""
+    tokenizer.model_max_length = dataset_args.sequence_length
+    if dataset_args.is_nanoset:
+        dataset_folders = dataset_args.dataset_folders
+        dataset_weights = dataset_args.dataset_weights
+        sequence_length = dataset_args.sequence_length
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
         token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
-        del tokenizer
-        # Create Nanoset
-        from nanotron.data.nanoset import Nanoset
-
-        with main_rank_first(trainer.parallel_context.world_pg):
-            train_dataset = Nanoset(
-                dataset_folders=data.dataset.dataset_folder,
-                dataset_weights=data.dataset.dataset_weights,
-                sequence_length=trainer.sequence_length,
-                token_size=token_size,
-                train_split_num_samples=trainer.config.tokens.train_steps
-                * trainer.global_batch_size,
-                random_seed=data.seed,
-            )
-
-        # Prepare dataloader
-        train_dataloader = build_nanoset_dataloader(
-            train_dataset,
-            trainer.sequence_length,
-            parallel_context=trainer.parallel_context,
-            input_pp_rank=input_pp_rank,
-            output_pp_rank=output_pp_rank,
-            micro_batch_size=trainer.micro_batch_size,
-            consumed_train_samples=consumed_train_samples,
-            dataloader_num_workers=data.num_loading_workers,
-            dataloader_drop_last=True,
+        global_batch_size = (
+            training_args.per_device_train_batch_size
+            * world_size
+            * training_args.gradient_accumulation_steps
         )
-
-        return train_dataloader
+        dataset = CustomNanoset(
+            dataset_folders=dataset_folders,
+            sequence_length=sequence_length,
+            dataset_weights=dataset_weights,
+            token_size=token_size,
+            train_split_num_samples=global_batch_size * training_args.max_steps,
+        )
     else:
-        raise ValueError(
-            f"Unhandled case of `self.config.data.dataset`. Got: {data.dataset}"
+        import datasets
+
+        dataset = datasets.load_dataset(
+            dataset_args.dataset_name_or_path, split="train"
         )
 
-    return dataloader
+    return dataset
 
 
-def get_dataloader(trainer: DistributedTrainer) -> Dict[str, DataLoader]:
-    dataloaders = {}
+def load_config(config_path):
+    """Load configuration from a YAML file."""
+    with open(config_path, "r") as file:
+        return yaml.safe_load(file)
 
-    for stage_idx, stage in enumerate(trainer.config.data_stages):
-        # NOTE: we only create the dataloader for the first stage,
-        # then we lazy initialize the dataloader for the other stages
-        stage = cast(DatasetStageArgs, stage)
-        consumed_train_samples = get_consumed_train_samples_of_a_data_stage_from_ckp(
-            stage, trainer.metadata
+
+def load_tokenizer_and_model(model_args: ModelArguments):
+    """Load tokenizer and model from configuration."""
+    assert model_args.model_name_or_path is not None, (
+        "Must provide the path to the model"
+    )
+    if model_args.tokenizer_name_or_path is None:
+        model_args.tokenizer_name_or_path = model_args.model_name_or_path
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_args.model_name_or_path, config=config
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    return model, tokenizer
+
+
+def load_optimizer_scheduler(model, training_args, model_args):
+    """Load optimizer and scheduler from configuration."""
+    optimizer_name = training_args.optim
+    if "adam" in optimizer_name:
+        optimizer = torch.optim.AdamW(
+            params=model.parameters(),
+            lr=training_args.learning_rate,
+            betas=(
+                training_args.adam_beta1,
+                training_args.adam_beta2,
+            ),
+            eps=training_args.adam_epsilon,
+            weight_decay=training_args.weight_decay,
+            fused=bool(training_args.optim == "adamw_torch_fused"),
         )
-        assert (
-            consumed_train_samples is not None
-        ), f"Cannot find consumed_train_samples for stage {stage.start_training_step} in the checkpoint"
-
-        num_remaining_train_steps = compute_remain_train_steps_of_a_data_stage_from_ckp(
-            stage, trainer.config, trainer.metadata
+    else:
+        raise ValueError(f"Unknown optimizer factory {optimizer_name}")
+    if training_args.use_constant_with_warmup_decay_scheduler:
+        lr_scheduler = load_scheduler4constant_with_warmup_decay(
+            optimizer, training_args
         )
-        log_rank(
-            f"[Training Plan] Stage {stage.name} has {num_remaining_train_steps} remaining training steps and has consumed {consumed_train_samples} samples",
-            logger=logger,
-            level=logging.INFO,
-            rank=0,
+    else:
+        from transformers import get_scheduler
+
+        lr_scheduler = get_scheduler(
+            training_args.lr_scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=training_args.warmup_steps,
+            num_training_steps=training_args.max_steps,
         )
-
-        dataloader = (
-            get_dataloader_from_data_stage(
-                trainer,
-                stage.data,
-                consumed_train_samples=consumed_train_samples,
-                num_remaining_train_steps=num_remaining_train_steps,
-            )
-            if stage_idx == 0
-            else lambda stage=stage: get_dataloader_from_data_stage(
-                trainer,
-                stage.data,
-                consumed_train_samples=consumed_train_samples,
-                num_remaining_train_steps=num_remaining_train_steps,
-            )
-        )
-        dataloaders[stage.name] = dataloader
-    return dataloaders
+    return optimizer, lr_scheduler
 
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--config-file",
+def main():
+    import argparse
+
+    cmd_parser = argparse.ArgumentParser()
+    cmd_parser.add_argument(
+        "--config_file",
         type=str,
         required=True,
-        help="Path to the YAML or python config file",
+        help="Path to the YAML configuration file.",
     )
-    return parser.parse_args()
+    cmd_parser.add_argument(
+        "--is_auto_encoder",
+        action="store_true",
+        help="Whether to use auto_encoder.",
+    )
+    args = cmd_parser.parse_args()
+    config = load_config(args.config_file)
+    parser = HfArgumentParser((CustomTrainingArguments, ModelArguments, DataArguments))
+    training_args, model_args, dataset_args = parser.parse_dict(config)
+
+    # Monkey Pacth
+    if args.is_auto_encoder:
+        from monkey_patch import ae_patch_func_hf
+
+        ae_patch_func_hf()
+
+    # Trainer
+    model, tokenizer = load_tokenizer_and_model(model_args)
+    if training_args.bf16:
+        model = model.to(dtype=torch.bfloat16)
+    elif training_args.fp16:
+        model = model.to(dtype=torch.float16)
+
+    train_dataset = load_dataset(dataset_args, training_args, tokenizer)
+    resume_from_checkpoint = training_args.resume_from_checkpoint
+    optimizer, lr_scheduler = load_optimizer_scheduler(model, training_args, model_args)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        return_tensors="pt",
+    )
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        args=training_args,
+        train_dataset=train_dataset,
+        optimizers=(optimizer, lr_scheduler),
+        data_collator=data_collator,
+    )
+    # train
+    if resume_from_checkpoint is not None:
+        trainer.train(resume_from_checkpoint)
+    else:
+        if int(os.getenv("LOCAL_RANK", 0)) == 0 and model_args.save_initial_model:
+            trainer._save_checkpoint()
+        trainer.train()
 
 
 if __name__ == "__main__":
-    args = get_args()
-    config_file = args.config_file
-
-    # Monkey patch
-    from patch_func_nt import ae_patch_func_nt,CustomConfig
-    import yaml
-    with open(config_file, "r") as fin:
-        config = yaml.safe_load(fin)
-    rope_cfg=config["model"]["model_config"]["RoPE"]
-    ae_patch_func_nt(rope_cfg)
-
-    from nanotron import trainer as nt_trainer
-    # Load trainer and data
-    trainer = nt_trainer.DistributedTrainer(config_file,config_class=CustomConfig)
-    # print(trainer.unwrapped_model.config.rope_interleaved)
-    dataloader = get_dataloader(trainer)
-
-    # LlamaRotaryEmbedding.partial_rope_cfg = cfg
-    # Train
-    trainer.train(dataloader)
+    main()

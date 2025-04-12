@@ -165,7 +165,7 @@ if __name__ == "__main__":
     if args.auto_encoder:
         with open(os.path.join(args.checkpoint_path,"model_config.json")) as f:
             config = json.load(f)
-        from ..auto_encoder.patch_func_hf import ae_patch_func_hf
+        from ..auto_encoder.monkey_patch import ae_patch_func_hf
         from ..auto_encoder.patch_func_nt import ae_patch_func_nt,CustomLlamaConfig
         ae_patch_func_nt(config["RoPE"])
         ae_patch_func_hf(config["RoPE"])

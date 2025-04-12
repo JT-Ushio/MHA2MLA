@@ -1,41 +1,50 @@
 import torch
 from dataclasses import dataclass
-from transformers import AutoTokenizer, Trainer, TrainingArguments, HfArgumentParser, AutoConfig
-from transformers import LlamaConfig, LlamaForCausalLM, AutoModelForCausalLM,PreTrainedModel,DataCollatorForLanguageModeling
-from transformers.models.llama import modeling_llama
+from transformers import (
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments,
+    HfArgumentParser,
+    AutoConfig,
+    AutoModelForCausalLM,
+    PreTrainedModel,
+    DataCollatorForLanguageModeling,
+)
 from nanotron.data.nanoset import Nanoset
 from nanotron.parallel.pipeline_parallel.block import TensorPointer
 import os
 from typing import Dict, List, Tuple, Union, Optional
 import numpy as np
-from nanotron.logging import warn_once
-import logging
-import importlib
 import yaml
-import torch
 from accelerate import __version__ as accelerate_version
 from packaging import version
 from transformers.trainer_pt_utils import remove_dummy_checkpoint
-
+from transformers.cache_utils import DynamicCache, Cache
 from transformers.utils import (
     SAFE_WEIGHTS_NAME,
     WEIGHTS_NAME,
     is_sagemaker_mp_enabled,
     is_torch_xla_available,
-    logging,
 )
+import functools
 
 from lr_scheduler import load_scheduler as load_scheduler4constant_with_warmup_decay
+
+
+@dataclass
+class CustomTrainingArguments(TrainingArguments):
+    use_constant_with_warmup_decay_scheduler: bool = False
+    compute_loss: str = "v0"
+
 
 @dataclass
 class ModelArguments:
     model_name_or_path: str = None
     tokenizer_name_or_path: str = None
     save_initial_model: bool = False
-    use_constant_with_warmup_decay_scheduler: bool = False
     RoPE: dict = None
-    AE: dict = None
-    save_in_nt_format: bool = False
+    auto_encoder: dict = None
+
 
 @dataclass
 class DataArguments:
@@ -52,163 +61,206 @@ TYPE_DICT = {
     "bfloat16": torch.bfloat16,
 }
 
-def CustomTrainer(Trainer):
-    def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
-        """
-        Will save the model, so you can reload it using `from_pretrained()`.
 
-        Will only save from the main process.
-        """
+def process_state_dict_for_llama(model, state_dict):
+    for layer_idx, layer in enumerate(model.model.layers):
+        prefix = f"model.layers.{layer_idx}.self_attn."
+        Q = state_dict.pop(prefix + "q_proj.weight")
+        K = state_dict.pop(prefix + "k_proj.weight")
+        nope_mask_for_q = layer.self_attn.nope_mask_for_q
+        nope_mask_for_k = layer.self_attn.nope_mask_for_k
+        state_dict[prefix + "W_q_rope.weight"] = Q[~nope_mask_for_q, :]
+        state_dict[prefix + "W_q_nope.weight"] = Q[nope_mask_for_q, :]
+        state_dict[prefix + "W_k_rope.weight"] = K[~nope_mask_for_k, :]
+        state_dict[prefix + "W_k_nope.weight"] = K[nope_mask_for_k, :]
+    return state_dict
 
-        if output_dir is None:
-            output_dir = self.args.output_dir
 
-        if is_torch_xla_available():
-            raise NotImplementedError("Saving auto-encoder is not supported with XLA.")
-        elif is_sagemaker_mp_enabled():
-            raise NotImplementedError("Saving auto-encoder is not supported with sagemaker_mp.")
-        elif self.is_fsdp_enabled:
-            if ("FULL_STATE_DICT" in str(self.accelerator.state.fsdp_plugin.state_dict_type)) and (
-                version.parse(accelerate_version) > version.parse("0.24.1")
-            ):
-                state_dict = self.accelerator.get_state_dict(self.model)
-                if self.args.should_save:
-                    self._save(output_dir, state_dict=state_dict)
-        elif self.is_deepspeed_enabled:
-            try:
-                state_dict = self.accelerator.get_state_dict(self.deepspeed)
-                if self.args.should_save:
-                    self._save(output_dir, state_dict=state_dict)
-            except ValueError:
-                if self.args.should_save:
-                    self._save(output_dir, state_dict={})
-                # remove the dummy state_dict
-                remove_dummy_checkpoint(self.args.should_save, output_dir, [WEIGHTS_NAME, SAFE_WEIGHTS_NAME])
-                self.model_wrapped.save_checkpoint(output_dir)
+CLASS2FUNC = {
+    "LlamaForCausalLM": process_state_dict_for_llama,
+}
 
-        elif self.args.should_save:
-            state_dict = self.model.state_dict()
-        
-        if self.args.should_save:
-            state_dict = {key: value for key, value in state_dict.items() if "self_attn" in key}
-            self._save(output_dir,state_dict)
 
-        # Push to the Hub when `save_model` is called by the user.
-        if self.args.push_to_hub and not _internal_call:
-            self.push_to_hub(commit_message="Model save")
+def get_key_value_for_llama(attn, inputs):
+    hidden_states = inputs[1]["hidden_states"]
+    key_states = attn.k_proj(hidden_states)
+    value_states = attn.v_proj(hidden_states)
+    return key_states, value_states
 
-class AttnForTraing(PreTrainedModel):
-    config_class = LlamaConfig
-    def __init__(self,config):
-        super().__init__(config)
-        from patch_func_hf import CustomLlamaSdpaAttention,CustomLlamaAttention
-        self.config = config
-        self.model = torch.nn.ModuleList(
-            [
-                CustomLlamaSdpaAttention(
-                    config=config,
-                    layer_idx=layer_idx,
-                ) 
-                for layer_idx in range(config.num_hidden_layers)
-            ]
-        )
 
-    def post_init(self,original_model):
-        self.original_model = original_model
-        import os
-        self.loss_func = torch.nn.SmoothL1Loss(reduction="sum")
-        for layer_idx, layer in enumerate(self.original_model.model.layers):
-            original_attn = layer.self_attn
-            target_attn = self.model[layer_idx]
-            # k_proj,v_proj
-            _, k_proj, v_proj = original_attn.q_proj.weight.detach(), original_attn.k_proj.weight.detach(), original_attn.v_proj.weight.detach()
-            target_attn.k_proj.weight.data[:] = (k_proj.T[:, target_attn.nope_mask].T)
-            target_attn.v_proj.weight.data[:] = v_proj
-            # W_down_k, W_up_k
-            U,S,V = torch.svd(torch.eye(target_attn.auto_encoder.W_down_k.in_features).to(dtype=torch.float32))
-            low_rank = self.config.AE["low_rank"] * self.config.num_key_value_heads
-            dtype = target_attn.auto_encoder.W_down_k.weight.dtype
-            in_features = target_attn.auto_encoder.W_down_k.in_features
-            out_features = target_attn.auto_encoder.W_down_k.out_features
-            target_attn.auto_encoder.W_down_k.weight.data[:] = torch.nn.init.xavier_uniform_(torch.empty(out_features, in_features,dtype=dtype))
-            target_attn.auto_encoder.W_up_k.weight.data[:] = torch.nn.init.xavier_uniform_(torch.empty(in_features, out_features,dtype=dtype))
-            # W_down_v, W_up_v
-            if hasattr(target_attn.auto_encoder,"W_down_v"):
-                U,S,V = torch.svd(torch.eye(target_attn.auto_encoder.W_down_v.in_features).to(dtype=torch.float32))
-                low_rank = self.config.AE["low_rank"] * self.config.num_key_value_heads
-                dtype = target_attn.auto_encoder.W_down_v.weight.dtype
-                in_features = target_attn.auto_encoder.W_down_v.in_features
-                out_features = target_attn.auto_encoder.W_down_v.out_features
-                target_attn.auto_encoder.W_down_v.weight.data[:] = torch.nn.init.xavier_uniform_(torch.empty(out_features, in_features,dtype=dtype))
-                target_attn.auto_encoder.W_up_v.weight.data[:] = torch.nn.init.xavier_uniform_(torch.empty(in_features, out_features,dtype=dtype))
+CLASS2KVFUNC = {
+    "LlamaForCausalLM": get_key_value_for_llama,
+}
 
-        for name,named_param in self.original_model.named_parameters():
-            named_param.requires_grad = False
-        for name,named_param in self.model.named_parameters():
-            if all([x not in name for x in ["W_down_v","W_up_v","W_down_k","W_up_k"]]):
-                named_param.requires_grad = False
-            else:
-                named_param.requires_grad = True
 
-        self.inputs = {}
-        for layer_id, layer in enumerate(self.original_model.model.layers):
-            attn = layer.self_attn
-            original_forward = attn.forward
-            
-            def make_new_forward(layer_id, inp_dict):
-                def new_forward(self,*args, **kwargs):
-                    output = self.original_forward(*args, **kwargs)
-                    inp_dict[layer_id] = (args, kwargs)
-                    return output
-                return new_forward
-    
-            import types
-            attn.original_forward = original_forward
-            attn.forward = types.MethodType(make_new_forward(layer_id, self.inputs), attn)
-
-    def forward(
+class AutoEncoderInitTrainer(Trainer):
+    @functools.wraps(Trainer.__init__)
+    def __init__(
         self,
-        input_ids: Union[torch.Tensor, TensorPointer],
-        attention_mask: Union[torch.Tensor, TensorPointer],
         **kwargs,
-    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-        self.inputs.clear()
-        importlib.reload(modeling_llama)
-        sharded_logits = self.original_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            use_cache=False,
-        )
-        loss = torch.zeros(1, device=input_ids.device)
-        warn_once(
-            msg = "Using SmoothL1Loss for RoPE loss",
-            logger = logging.getLogger(__name__),
-        )
-        for layer_idx,layer in enumerate(self.original_model.model.layers):
-            target_attn = self.model[layer_idx]
-            nope_mask = self.model[layer_idx].nope_mask
-            hidden_states = self.inputs[layer_idx][1]["hidden_states"]
-            k_r = target_attn.W_k_r(hidden_states)
-            original_k_nope = target_attn.k_proj(hidden_states)
-            original_value_states = target_attn.v_proj(hidden_states)
-            key_states,value_states = target_attn.auto_encoder(k_r,original_k_nope,original_value_states)
-            k_loss = self.loss_func(original_k_nope, key_states[...,nope_mask])
-            v_loss = self.loss_func(original_value_states, value_states)
-            layer_loss = k_loss + v_loss
-            loss += layer_loss / (hidden_states.shape[0] * hidden_states.shape[1])
+    ):
+        original_model = kwargs.pop("model").cuda()
+        self.original_model = original_model
+        self.loss_func = torch.nn.SmoothL1Loss(reduction="sum")
+        # Instance AutoEncoder Model
+        from monkey_patch import ae_patch_func_hf
 
-            # test
-            # test_key_states = self.model[layer_idx].W_down_k(self.model[layer_idx].k_proj(self.inputs[layer_idx][1]["hidden_states"]))
-            # from ..mla.utils import apply_activation
-            # test_key_states = apply_activation(test_key_states, self.config.SVD["activation_fn"])
-            # test_key_states = self.model[layer_idx].W_up_k(test_key_states)
-            # assert torch.allclose(test_key_states, key_states[...,nope_mask])
-            # print("loss rate:",(k_loss.item())/(k_loss + v_loss).item())
-            # k_norm = torch.mean(torch.norm(key_states[...,nope_mask], p=2, dim=-1))
-            # v_norm = torch.mean(torch.norm(value_states, p=2, dim=-1))
-            # print("norm rate:",k_norm.item()/(k_norm + v_norm).item())
-        loss = loss / len(self.original_model.model.layers)
-        return {"loss": loss}
+        ae_patch_func_hf()
+        model = original_model.__class__(original_model.config).cuda()
+        # Split model state_dict
+        original_state_dict = original_model.state_dict()
+        original_state_dict = CLASS2FUNC[original_model.__class__.__name__](
+            model, original_state_dict
+        )
+        # Initialize auto encoder
+        state_dict = model.state_dict()
+        for key, value in state_dict.items():
+            if "auto_encoder" in key:
+                if len(state_dict[key].shape) > 1:
+                    # Xavier_uniform for 2D weights
+                    state_dict[key] = torch.nn.init.xavier_uniform_(value)
+                else:
+                    # Gaussian for 1D weights
+                    state_dict[key] = torch.nn.init.normal_(value)
+                original_state_dict[key] = state_dict[key]
+        model.load_state_dict(original_state_dict)
+        # Freeze original model
+        for name, named_param in original_model.named_parameters():
+            named_param.requires_grad = False
+        for name, named_param in model.named_parameters():
+            if "auto_encoder" in name:
+                named_param.requires_grad = True
+            else:
+                named_param.requires_grad = False
+        # Monkey Patch for original k_nope and value_states
+        self.inputs = [[] for _ in enumerate(self.original_model.model.layers)]
+
+        def create_hook_fn_for_original(layer_idx):
+            def hook(module, args, kwargs, output):
+                self.inputs[layer_idx] = (args, kwargs)
+
+            return hook
+
+        for layer_idx, layer in enumerate(self.original_model.model.layers):
+            attn = layer.self_attn
+            attn.register_forward_hook(
+                create_hook_fn_for_original(layer_idx), with_kwargs=True
+            )
+        self.original_kv_func = CLASS2KVFUNC[original_model.__class__.__name__]
+        # Monkey Patch for ae
+        self.ae_output = [[] for _ in enumerate(model.model.layers)]
+
+        def create_hook_fn_for_ae(layer_idx):
+            def hook(module, args, kwargs, output):
+                self.ae_output[layer_idx] = output
+
+            return hook
+
+        for layer_idx, layer in enumerate(model.model.layers):
+            layer.self_attn.auto_encoder.register_forward_hook(
+                create_hook_fn_for_ae(layer_idx), with_kwargs=True
+            )
+        super().__init__(
+            model=model,
+            **kwargs,
+        )
+        self.model_accepts_loss_kwargs = False
+
+    def compute_loss_v0(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
+        _ = self.original_model(
+            use_cache=False,
+            **inputs,
+        )
+        all_loss = []
+        for layer_idx, layer in enumerate(self.original_model.model.layers):
+            target_ae = self.model.model.layers[layer_idx].self_attn.auto_encoder
+            original_key_states, original_value_states = self.original_kv_func(
+                layer.self_attn, self.inputs[layer_idx]
+            )
+            original_k_nope = original_key_states[..., target_ae.nope_mask_for_k]
+            bsz, q_len, _ = original_key_states.shape
+            _, k_nope, value_states = target_ae(
+                k_rope=None,
+                k_nope=original_k_nope,
+                value_states=original_value_states,
+            )
+            k_nope = k_nope.squeeze(1)
+            value_states = value_states.squeeze(1)
+            k_loss = self.loss_func(original_k_nope, k_nope)
+            v_loss = self.loss_func(original_value_states, value_states)
+            layer_loss = (k_loss + v_loss) / (bsz * q_len)
+            all_loss.append(layer_loss)
+        all_loss = torch.stack(all_loss, dim=0)
+        all_loss = torch.mean(all_loss, dim=0, keepdim=False)
+        return all_loss
+
+    def compute_loss_v1(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
+        _ = self.original_model(
+            use_cache=False,
+            **inputs,
+        )
+        current_step = self.state.global_step
+        max_steps = self.args.max_steps
+        assert max_steps % self.model.config.num_hidden_layers == 0
+        block_step = max_steps // self.model.config.num_hidden_layers
+        current_idx = current_step // block_step + 1
+        all_loss = []
+        for layer_idx in range(current_idx):
+            layer = self.original_model.model.layers[layer_idx]
+            target_ae = self.model.model.layers[layer_idx].self_attn.auto_encoder
+            original_key_states, original_value_states = self.original_kv_func(
+                layer.self_attn, self.inputs[layer_idx]
+            )
+            original_k_nope = original_key_states[..., target_ae.nope_mask_for_k]
+            bsz, q_len, _ = original_key_states.shape
+            k_nope = self.ae_output[layer_idx][1].unsqueeze(1)
+            value_states = self.ae_output[layer_idx][2].unsqueeze(1)
+            k_loss = self.loss_func(original_k_nope, k_nope)
+            v_loss = self.loss_func(original_value_states, value_states)
+            layer_loss = (k_loss + v_loss) / (bsz * q_len)
+            all_loss.append(layer_loss)
+        all_loss = torch.stack(all_loss, dim=0)
+        all_loss = torch.mean(all_loss, dim=0, keepdim=False)
+        return all_loss
+
+    def compute_loss(
+        self, model, inputs, return_outputs=False, num_items_in_batch=None
+    ):
+        assert return_outputs == False, "return_outputs should be False"
+        assert num_items_in_batch == None, "num_items_in_batch should be None"
+        if self.args.compute_loss == "v0":
+            loss = self.compute_loss_v0(
+                model, inputs, return_outputs, num_items_in_batch
+            )
+        elif self.args.compute_loss == "v1":
+            loss = self.compute_loss_v1(
+                model, inputs, return_outputs, num_items_in_batch
+            )
+        if self.args.average_tokens_across_devices and self.model_accepts_loss_kwargs:
+            loss *= self.accelerator.num_processes
+        return loss
+
+    def create_scheduler(self, num_training_steps: int, optimizer=None):
+        """Custom scheduler"""
+        if self.lr_scheduler is None:
+            if self.args.use_constant_with_warmup_decay_scheduler:
+                self.lr_scheduler = load_scheduler4constant_with_warmup_decay(
+                    optimizer, self.args
+                )
+            else:
+                from transformers import get_scheduler
+
+                self.lr_scheduler = get_scheduler(
+                    self.args.lr_scheduler_type,
+                    optimizer=optimizer,
+                    num_warmup_steps=self.args.warmup_steps,
+                    num_training_steps=self.args.max_steps,
+                )
+        return self.lr_scheduler
 
 
 def load_config(config_path):
@@ -216,60 +268,28 @@ def load_config(config_path):
     with open(config_path, "r") as file:
         return yaml.safe_load(file)
 
+
 def load_tokenizer_and_model(model_arguments):
     """Load tokenizer and model from configuration."""
     # model
     model_config = AutoConfig.from_pretrained(model_arguments.model_name_or_path)
     model_config.RoPE = model_arguments.RoPE
-    model_config.AE = model_arguments.AE
+    model_config.auto_encoder = model_arguments.auto_encoder
     model_name_or_path = model_arguments.model_name_or_path
     if model_name_or_path is not None:
-        model = LlamaForCausalLM.from_pretrained(model_name_or_path)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path, config=model_config
+        )
     else:
-        model = LlamaForCausalLM(model_config)
+        model = AutoModelForCausalLM(model_config)
     # tokenizer
     tokenizer_name_or_path = model_arguments.tokenizer_name_or_path
     if tokenizer_name_or_path is None:
         tokenizer_name_or_path = model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token  # Warning
-    original_model = model
-    model = AttnForTraing(model_config)
-    model.post_init(original_model)
     return model, tokenizer
 
-def load_optimizer_scheduler(model, training_args, model_args):
-    """Load optimizer and scheduler from configuration."""
-    optimizer_name = training_args.optim
-    if "adam" in optimizer_name:
-        optimizer = torch.optim.AdamW(
-            params=model.parameters(),
-            lr=training_args.learning_rate,
-            betas=(
-                training_args.adam_beta1,
-                training_args.adam_beta2,
-            ),
-            eps=training_args.adam_epsilon,
-            weight_decay=training_args.weight_decay,
-            fused=bool(training_args.optim=="adamw_torch_fused"),
-        )
-    else:
-        raise ValueError(
-            f"Unknown optimizer factory {optimizer_name}"
-        )
-    if model_args.use_constant_with_warmup_decay_scheduler:
-        lr_scheduler = load_scheduler4constant_with_warmup_decay(
-            optimizer, training_args
-        )
-    else:
-        from transformers import get_scheduler
-        lr_scheduler = get_scheduler(
-            training_args.lr_scheduler_type,
-            optimizer=optimizer,
-            num_warmup_steps=training_args.warmup_steps,
-            num_training_steps=training_args.max_steps,
-        )
-    return optimizer, lr_scheduler
 
 class CustomNanoset(Nanoset):
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
@@ -309,6 +329,7 @@ def load_dataset(dataset_args, training_args, tokenizer):
         )
     else:
         import datasets
+
         dataset = datasets.load_dataset(
             dataset_args.dataset_name_or_path, split="train"
         )
@@ -328,7 +349,9 @@ def main():
     )
     args = parser.parse_args()
     config = load_config(args.config_file)
-    hf_parser = HfArgumentParser((TrainingArguments, ModelArguments, DataArguments))
+    hf_parser = HfArgumentParser(
+        (CustomTrainingArguments, ModelArguments, DataArguments)
+    )
     training_args, model_args, data_args = hf_parser.parse_dict(config)
     # Trainer
     model, tokenizer = load_tokenizer_and_model(
@@ -336,18 +359,16 @@ def main():
     )
     train_dataset = load_dataset(data_args, training_args, tokenizer)
     resume_from_checkpoint = training_args.resume_from_checkpoint
-    optimizer, lr_scheduler = load_optimizer_scheduler(model, training_args, model_args)
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=False,
         return_tensors="pt",
     )
-    trainer = CustomTrainer(
+    trainer = AutoEncoderInitTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
-        optimizers=(optimizer, lr_scheduler),
         data_collator=data_collator,
     )
     # train
@@ -357,6 +378,7 @@ def main():
         if int(os.getenv("LOCAL_RANK", 0)) == 0 and model_args.save_initial_model:
             trainer._save_checkpoint()
         trainer.train()
+
 
 if __name__ == "__main__":
     main()

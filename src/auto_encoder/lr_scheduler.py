@@ -130,9 +130,9 @@ def lr_scheduler_builder(
     for param_group in optimizer.param_groups:
         lr_lambdas.append(get_lr_lambda_for_param_group(lr=param_group["lr"]))
 
-    assert len(lr_lambdas) == len(
-        optimizer.param_groups
-    ), "Custom learning rate functions dont match the number of param groups"
+    assert len(lr_lambdas) == len(optimizer.param_groups), (
+        "Custom learning rate functions dont match the number of param groups"
+    )
 
     log_rank(
         f"[Optimizer Building] There are total {len(lr_lambdas)} custom learning rate function for parameter groups",
@@ -148,6 +148,7 @@ def load_scheduler(optimizer, training_args):
     """Load learning rate scheduler from configuration."""
     # adamW
     import json
+
     # lr_scheduler
     lr_scheduler_kwargs = training_args.lr_scheduler_kwargs
     if isinstance(lr_scheduler_kwargs, str):

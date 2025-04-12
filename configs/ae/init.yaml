@@ -2,19 +2,19 @@
 seed: 42
 max_steps: 2000
 report_to: wandb
-run_name: rope_v4_topk4_ae_v2_rank8_tanh_init_lr1e-3
+run_name: rope_v4_topk4_ae_v2_rank8_null_init_lr1e-3
 save_strategy : steps
 save_steps: 0.5
-output_dir: ../checkpoints/rope_v4_topk4_ae_v2_rank8_tanh_init
+output_dir: checkpoints/rope_v4_topk4_ae_v2_rank8_null_init
 overwrite_output_dir: true
 logging_strategy: steps
-logging_steps: 10
+logging_steps: 1
 resume_from_checkpoint: null
-per_device_train_batch_size: 16
+per_device_train_batch_size: 8
 remove_unused_columns: False
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 2
 bf16: true
-# deepspeed: ../configs_hf/rope/ds_config.json
+# deepspeed: configs_hf/rope/ds_config.json
 dataloader_drop_last: true
 # optim
 optim: adamw_torch
@@ -32,6 +32,19 @@ lr_scheduler_kwargs: {"lr_decay_starting_step": 1000, "lr_decay_steps": 1000, "l
 # model
 model_name_or_path: /home/binguo/data/models/HuggingFaceTB/SmolLM-135M
 tokenizer_name_or_path: /home/binguo/data/models/HuggingFaceTB/SmolLM-135M
+RoPE:
+  partial_rope_version: 4  # 0 1 2 3 4 5
+  top_k_rope_dim: 4
+  last_k_rope_dim: 0
+  uniform_start_point: 0
+  uniform_step: 1
+  qk_tensor_path: 'utils/qk_tensor_135M.pth'
+  n_gqa_group: 3
+auto_encoder:
+  version: 2
+  low_rank_per_head: 8
+  activation_fn: null
+  enable_norm: false
 
 # dataset
 is_nanoset: true
@@ -41,24 +54,10 @@ dataset_folders:
   - ~/local/smollm1_corpus/python-edu/
   - ~/local/smollm1_corpus/open-web-math/
   - ~/local/smollm1_corpus/stackoverflow/
-dataset_weights: # 各数据集的权重
+dataset_weights:
   - 0.7
   - 0.15
   - 0.08
   - 0.06
   - 0.01
 sequence_length: 2048
-
-# model config
-RoPE:
-  partial_rope_version: 4  # 0 1 2 3 4 5
-  top_k_rope_dim: 4
-  last_k_rope_dim: 0
-  uniform_start_point: 0
-  uniform_step: 1
-  qk_tensor_path: '../utils/qk_tensor_135M.pth'
-  n_gqa_group: 3
-AE:
-  version: 2
-  low_rank: 8
-  activation_fn: tanh

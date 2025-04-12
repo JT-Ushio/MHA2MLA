@@ -136,7 +136,7 @@ if __name__ == "__main__":
         import json,os
         with open(os.path.join(args.checkpoint_path,"config.json")) as f:
             config = json.load(f)
-        from ..auto_encoder.patch_func_hf import ae_patch_func_hf
+        from ..auto_encoder.monkey_patch import ae_patch_func_hf
         from ..auto_encoder.patch_func_nt import ae_patch_func_nt,CustomLlamaConfig
         ae_patch_func_hf(config["RoPE"])
         ae_patch_func_nt(config["RoPE"])

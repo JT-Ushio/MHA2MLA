@@ -334,7 +334,7 @@ def get_fig_ax():
     return fig, axes
 
 
-def visualize(query_states, key_states):
+def visualize(query_states, key_states): # [num_layers][num_heads][num_dim/2]
     dir = "../images/2-norm"
     num_layers = query_states.shape[0]
     # query

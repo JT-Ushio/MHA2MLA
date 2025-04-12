@@ -12,6 +12,7 @@ from transformers.models.llama.modeling_llama import (
     logger,
     LlamaRotaryEmbedding,
     repeat_kv,
+    rotate_half,
 )
 from transformers.models.llama import modeling_llama
 from transformers.cache_utils import Cache, StaticCache
@@ -19,8 +20,26 @@ from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.utils import is_flash_attn_greater_or_equal_2_10
 
 
+def apply_activation(x: torch.Tensor, activation_fn: str):
+    if activation_fn is not None:
+        activation_fn = activation_fn.lower()
+    if activation_fn is None:
+        return x
+    elif activation_fn == "relu":
+        return F.relu(x)
+    elif activation_fn == "sigmoid":
+        return torch.sigmoid(x)
+    elif activation_fn == "tanh":
+        return torch.tanh(x)
+    elif activation_fn == "leaky_relu":
+        return F.leaky_relu(x)
+    elif activation_fn == "softmax":
+        return F.softmax(x, dim=-1)
+    elif activation_fn == "silu" or activation_fn == "swish":
+        return F.silu(x)
+    else:
+        raise ValueError(f"Unsupported activation function: {activation_fn}")
 
-from utils import apply_activation
 
 class IndexForNope:
     _qk_tensor_path = None
@@ -121,243 +140,66 @@ class IndexForNope:
         return nope_mask
 
 
-class SvdInit:
-    @staticmethod
-    def method_I(k, v, r=8):
-        U_k, S_k, V_k = torch.svd(k)
-        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
-        U_v, S_v, V_v = torch.svd(v)
-        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
-        W_down = (U_k[:, :r] + U_v[:, :r]) / 2
-        W_up_k = torch.diag(S_k) @ V_k.t()
-        W_up_v = torch.diag(S_v) @ V_v.t()
-        return W_down.t(), W_up_k.t(), None, W_up_v.t()
-
-    @staticmethod
-    def method_II(k, v, r=8):
-        # Separately decompose W_k_nope and W_v into truncated SVDs, allocating dimensions to each
-        U_k, S_k, V_k = torch.svd(k)
-        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
-        U_v, S_v, V_v = torch.svd(v)
-        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
-        W_down_k = U_k
-        W_down_v = U_v
-        W_up_k = torch.diag(S_k) @ V_k.t()
-        W_up_v = torch.diag(S_v) @ V_v.t()
-        return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
-
-    @staticmethod
-    def method_III(k, v, r=8):
-        U_k, S_k, V_k = torch.svd(k)
-        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
-        U_v, S_v, V_v = torch.svd(v)
-        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
-        Sigma_k_half = torch.diag(torch.sqrt(S_k))
-        Sigma_v_half = torch.diag(torch.sqrt(S_v))
-        W_down_k = U_k @ Sigma_k_half
-        W_down_v = U_v @ Sigma_v_half
-        W_up_k = Sigma_k_half @ V_k.t()
-        W_up_v = Sigma_v_half @ V_v.t()
-        return W_down_k.t(), W_up_k.t(), W_down_v.t(), W_up_v.t()
-
-    @staticmethod
-    def method_IV(k, v, r=8):
-        U_k, S_k, V_k = torch.svd(k)
-        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
-        U_v, S_v, V_v = torch.svd(v)
-        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
-        Sigma_k_half = torch.diag(torch.sqrt(S_k))
-        Sigma_v_half = torch.diag(torch.sqrt(S_v))
-        W_down_k = U_k @ Sigma_k_half
-        W_down_v = U_v @ Sigma_v_half
-        W_down = (W_down_k + W_down_v) / 2
-        W_up_k = Sigma_k_half @ V_k.t()
-        W_up_v = Sigma_v_half @ V_v.t()
-        return W_down.t(), W_up_k.t(), None, W_up_v.t()
-
-    @staticmethod
-    def method_V(k, v, r=8):
-        U_k, S_k, V_k = torch.svd(k)
-        U_k, S_k, V_k = U_k[:, :r], S_k[:r], V_k[:, :r]
-        W_down = U_k
-        W_down_pseudo_inv = torch.linalg.pinv(W_down)
-        W_up_k = torch.diag(S_k) @ V_k.t()
-        W_up_v = torch.matmul(W_down_pseudo_inv, v)
-        return W_down.t(), W_up_k.t(), None, W_up_v.t()
-
-    @staticmethod
-    def method_VI(k, v, r=8):
-        U_v, S_v, V_v = torch.svd(v)
-        U_v, S_v, V_v = U_v[:, :r], S_v[:r], V_v[:, :r]
-        W_down = U_v
-        W_down_pseudo_inv = torch.linalg.pinv(W_down)
-        W_up_k = torch.matmul(W_down_pseudo_inv, k)
-        W_up_v = torch.diag(S_v) @ V_v.t()
-        return W_down.t(), W_up_k.t(), None, W_up_v.t()
-
-    @staticmethod
-    def method_VII(k, v, r=8):
-        # jointly factorize the con-catenated matrix
-        U_kv, S_kv, V_kv = torch.svd(torch.cat([k, v], dim=1))
-        U_kv, S_kv, V_kv = U_kv[:, :r], S_kv[:r], V_kv[:, :r]
-        W_down = U_kv
-        split_sizes = [k.size(1), v.size(1)]
-        W_up_k, W_up_v = torch.split(V_kv, split_sizes, dim=0)
-        W_up_k = torch.diag(S_kv) @ W_up_k.t()
-        W_up_v = torch.diag(S_kv) @ W_up_v.t()
-        return W_down.t(), W_up_k.t(), None, W_up_v.t()
-
-    @staticmethod
-    def init(k, v, svd_method=1, r=8):
-        assert k.dtype == v.dtype, "k and v must have the same dtype"
-        logger.info(f"Using SVD method {svd_method} with rank {r}")
-        original_dtype = k.dtype
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
-        versions = {
-            1: SvdInit.method_I,
-            2: SvdInit.method_II,
-            3: SvdInit.method_III,
-            4: SvdInit.method_IV,
-            5: SvdInit.method_V,
-            6: SvdInit.method_VI,
-            7: SvdInit.method_VII,
-        }
-        W_down_k, W_up_k, W_down_v, W_up_v = versions[svd_method](k, v, r)
-        W_down_k = W_down_k.to(original_dtype)
-        W_up_k = W_up_k.to(original_dtype)
-        if W_down_v is not None:
-            W_down_v = W_down_v.to(original_dtype)
-        W_up_v = W_up_v.to(original_dtype)
-        return W_down_k, W_up_k, W_down_v, W_up_v
-
-
-class AutoEncoderV1(nn.Module):
-    # Low-rank decomposition of k_nope and v without sharing cache.
-
-    def __init__(
-        self, config: LlamaConfig, layer_idx: Optional[int], nope_mask: torch.Tensor
-    ):
+class RMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.nope_mask = nope_mask
-        self.W_down_k = nn.Linear(
-            nope_mask.sum().item(),
-            config.AE["low_rank"] * config.num_key_value_heads,
-            bias=False,
-        )
-        self.W_down_v = nn.Linear(
-            config.num_key_value_heads * config.head_dim,
-            config.AE["low_rank"] * config.num_key_value_heads,
-            bias=False,
-        )
-        self.W_up_k = nn.Linear(
-            self.W_down_k.out_features,
-            nope_mask.sum().item(),
-            bias=False,
-        )
-        self.W_up_v = nn.Linear(
-            self.W_down_v.out_features,
-            config.num_key_value_heads * config.head_dim,
-            bias=False,
-        )
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
 
-    def forward(
-        self,
-        k_r: torch.Tensor,  # [bsz, q_len, rope_dim]
-        k_nope: torch.Tensor,  # [bsz, q_len, nope_dim]
-        value_states: torch.Tensor,  # [bsz, q_len, num_key_value_heads* head_dim]
-        cache_kwargs: dict = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # will become mandatory in v4.46
-        **kwargs,
-    ) -> Tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
-    ]:  # [bsz, q_len, num_key_value_heads* head_dim]
-        bsz, q_len, _ = k_nope.size()
-        c_k = apply_activation(self.W_down_k(k_nope), self.config.AE["activation_fn"])
-        c_v = apply_activation(
-            self.W_down_v(value_states), self.config.AE["activation_fn"]
-        )
-        if past_key_value is not None:
-            # change shape for cache(Cache will cat the input on the -2 dim which is the q_len)
-            rope_dim = k_r.size(-1)
-            k_r = k_r.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                1, 2
-            )
-            c_kv = torch.cat(
-                [
-                    c_k.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                        1, 2
-                    ),
-                    c_v.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                        1, 2
-                    ),
-                ],
-                dim=-1,
-            )
-            k_r, c_kv = past_key_value.update(k_r, c_kv, self.layer_idx, cache_kwargs)
-            k_r = k_r.transpose(1, 2).reshape(bsz, -1, rope_dim)
-            c_k, c_v = c_kv.split(
-                [
-                    self.config.AE["low_rank"],
-                    self.config.AE["low_rank"],
-                ],
-                dim=-1,
-            )
-            c_k = c_k.transpose(1, 2).reshape(
-                bsz, -1, self.config.AE["low_rank"] * self.config.num_key_value_heads
-            )
-            c_v = c_v.transpose(1, 2).reshape(
-                bsz, -1, self.config.AE["low_rank"] * self.config.num_key_value_heads
-            )
-        k_c = self.W_up_k(c_k)
-        value_states = self.W_up_v(c_v)
-        key_states = torch.zeros(
-            bsz,
-            k_c.size(1),
-            self.nope_mask.shape[-1],
-            device=k_nope.device,
-            dtype=k_nope.dtype,
-        )
-        key_states[..., self.nope_mask] = k_c
-        key_states[..., ~self.nope_mask] = k_r
-        return key_states, value_states
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
 
-class AutoEncoderV2(nn.Module):
+class AutoEncoder(nn.Module):
     # Low-rank decomposition of k_nope and v with shared cache.
 
-    def __init__(
-        self, config: LlamaConfig, layer_idx: Optional[int], nope_mask: torch.Tensor
-    ):
+    def __init__(self, config: LlamaConfig, layer_idx: Optional[int]):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
-        self.nope_mask = nope_mask
-        self.W_down_k = nn.Linear(
-            nope_mask.sum().item() + config.num_key_value_heads * config.head_dim,
-            config.AE["low_rank"] * config.num_key_value_heads,
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.num_attention_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
+        self.nope_mask_for_k = IndexForNope.get_index_for_nope(
+            config.RoPE,
+            head_dim=self.head_dim,
+            head_num=self.num_key_value_heads,
+            layer_idx=layer_idx,
+        )
+        self.nope_mask_for_q = (
+            self.nope_mask_for_k.view(config.num_key_value_heads, self.head_dim)
+            .repeat_interleave(
+                config.num_attention_heads // config.num_key_value_heads, dim=0
+            )
+            .reshape(-1)
+        )
+        self.head_nope_dim = (
+            self.nope_mask_for_k.sum().item() // config.num_key_value_heads
+        )
+        self.head_rope_dim = self.head_dim - self.head_nope_dim
+        self.W_down = nn.Linear(
+            config.num_key_value_heads * (self.head_nope_dim + self.head_dim),
+            config.auto_encoder["low_rank_per_head"] * config.num_key_value_heads,
             bias=False,
         )
-        self.W_up_k = nn.Linear(
-            self.W_down_k.out_features,
-            nope_mask.sum().item() + config.num_key_value_heads * config.head_dim,
+        self.W_up = nn.Linear(
+            self.W_down.out_features,
+            self.W_down.in_features,
             bias=False,
         )
+        if "enable_norm" in config.auto_encoder and config.auto_encoder["enable_norm"]:
+            self.kv_layernorm = RMSNorm(
+                config.auto_encoder["low_rank_per_head"] * config.num_key_value_heads
+            )
 
     def forward(
         self,
-        k_r: torch.Tensor,  # [bsz, q_len, rope_dim]
-        k_nope: torch.Tensor,  # [bsz, q_len, nope_dim]
+        k_rope: torch.Tensor,  # [bsz, num_key_value_heads, q_len, head_rope_dim]
+        k_nope: torch.Tensor,  # [bsz, q_len, num_key_value_heads* head_nope_dim]
         value_states: torch.Tensor,  # [bsz, q_len, num_key_value_heads* head_dim]
         cache_kwargs: dict = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -375,131 +217,31 @@ class AutoEncoderV2(nn.Module):
     ]:  # [bsz, q_len, num_key_value_heads* head_dim]
         bsz, q_len, _ = k_nope.size()
         kv = torch.cat([k_nope, value_states], dim=-1)
-        c_kv = apply_activation(self.W_down_k(kv), self.config.AE["activation_fn"])
+        c_kv = apply_activation(
+            self.W_down(kv), self.config.auto_encoder["activation_fn"]
+        )
+        c_kv = c_kv.view(bsz, q_len, 1, -1).transpose(
+            1, 2
+        )  # [bsz, 1, q_len, low_rank_per_head* self.num_key_value_heads]
+        if hasattr(self, "kv_layernorm"):
+            c_kv = self.kv_layernorm(c_kv)
         if past_key_value is not None:
-            # change shape for cache(Cache will cat the input on the -2 dim which is the q_len)
-            rope_dim = k_r.size(-1)
-            k_r = k_r.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                1, 2
+            k_rope, c_kv = past_key_value.update(
+                k_rope, c_kv, self.layer_idx, cache_kwargs
             )
-            c_kv = c_kv.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                1, 2
-            )
-            k_r, c_kv = past_key_value.update(k_r, c_kv, self.layer_idx, cache_kwargs)
-            k_r = k_r.transpose(1, 2).reshape(bsz, -1, rope_dim)
-            c_kv = c_kv.transpose(1, 2).reshape(
-                bsz, -1, self.config.AE["low_rank"] * self.config.num_key_value_heads
-            )
-        kv = self.W_up_k(c_kv)
-        k_c, value_states = kv.split(
+        kv = self.W_up(c_kv)
+        k_nope, value_states = kv.split(
             [
-                self.nope_mask.sum().item(),
+                self.nope_mask_for_k.sum().item(),
                 self.config.num_key_value_heads * self.config.head_dim,
             ],
             dim=-1,
-        )
-        key_states = torch.zeros(
-            bsz,
-            k_c.size(1),
-            self.nope_mask.shape[-1],
-            device=k_nope.device,
-            dtype=k_nope.dtype,
-        )
-        key_states[..., self.nope_mask] = k_c
-        key_states[..., ~self.nope_mask] = k_r
-        return key_states, value_states
-
-
-class AutoEncoderV3(nn.Module):
-    # Low-rank decomposition of k_nope and v with shared cache. The difference from v2 is that W_down_k and W_up_k are specific to individual heads.
-
-    def __init__(
-        self, config: LlamaConfig, layer_idx: Optional[int], nope_mask: torch.Tensor
-    ):
-        super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.nope_mask = nope_mask
-        self.W_down_k = nn.Linear(
-            nope_mask.sum().item() // config.num_key_value_heads + config.head_dim,
-            config.AE["low_rank"],
-            bias=False,
-        )
-        self.W_up_k = nn.Linear(
-            self.W_down_k.out_features,
-            self.W_down_k.in_features,
-            bias=False,
-        )
-
-    def forward(
-        self,
-        k_r: torch.Tensor,  # [bsz, q_len, rope_dim]
-        k_nope: torch.Tensor,  # [bsz, q_len, nope_dim]
-        value_states: torch.Tensor,  # [bsz, q_len, num_key_value_heads* head_dim]
-        cache_kwargs: dict = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # will become mandatory in v4.46
-        **kwargs,
-    ) -> Tuple[
-        torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]
-    ]:  # [bsz, q_len, num_key_value_heads* head_dim]
-        bsz, q_len, _ = k_nope.size()
-        # kv = torch.cat([k_nope,value_states],dim=-1)
-        kv = torch.cat(
-            [
-                k_nope.view(bsz, q_len, self.config.num_key_value_heads, -1),
-                value_states.view(
-                    bsz, q_len, self.config.num_key_value_heads, self.config.head_dim
-                ),
-            ],
-            dim=-1,
-        )
-        c_kv = apply_activation(self.W_down_k(kv), self.config.AE["activation_fn"])
-        if past_key_value is not None:
-            # change shape for cache(Cache will cat the input on the -2 dim which is the q_len)
-            rope_dim = k_r.size(-1)
-            k_r = k_r.view(bsz, q_len, self.config.num_key_value_heads, -1).transpose(
-                1, 2
-            )
-            c_kv = c_kv.transpose(1, 2)
-            k_r, c_kv = past_key_value.update(k_r, c_kv, self.layer_idx, cache_kwargs)
-            k_r = k_r.transpose(1, 2).reshape(bsz, -1, rope_dim)
-            c_kv = c_kv.transpose(1, 2)
-        kv = self.W_up_k(c_kv)
-        k_c, value_states = kv.split(
-            [
-                self.nope_mask.sum().item()//self.config.num_key_value_heads,
-                self.config.head_dim,
-            ],
-            dim=-1,
-        )
-        k_c = k_c.reshape(bsz, -1, self.nope_mask.sum().item())
-        value_states = value_states.reshape(
-            bsz, -1, self.config.num_key_value_heads * self.config.head_dim
-        )
-        key_states = torch.zeros(
-            bsz,
-            k_c.size(1),
-            self.nope_mask.shape[-1],
-            device=k_nope.device,
-            dtype=k_nope.dtype,
-        )
-        key_states[..., self.nope_mask] = k_c
-        key_states[..., ~self.nope_mask] = k_r
-        return key_states, value_states
+        )  # [bsz, seq_len, key_value_heads* head_dim]
+        return k_rope, k_nope, value_states
 
 
 AUTO_ENCODER_VERSION_MAP = {
-    1: AutoEncoderV1,
-    2: AutoEncoderV2,
-    3: AutoEncoderV3,
+    2: AutoEncoder,
 }
 
 
@@ -525,20 +267,33 @@ class CustomLlamaAttention(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
-        self.nope_mask = IndexForNope.get_index_for_nope(
-            config.RoPE,
-            head_dim=self.head_dim,
-            head_num=self.num_key_value_heads,
-            layer_idx=layer_idx,
-        )
-        self.low_rank = config.AE["low_rank"]
+        self.low_rank_per_head = config.auto_encoder["low_rank_per_head"]
 
-        self.q_proj = nn.Linear(
-            self.hidden_size, self.num_heads * self.head_dim, bias=config.attention_bias
+        self.auto_encoder = AUTO_ENCODER_VERSION_MAP[config.auto_encoder["version"]](
+            config, layer_idx
         )
-        self.k_proj = nn.Linear(
+        self.nope_mask_for_k = self.auto_encoder.nope_mask_for_k
+        self.nope_mask_for_q = self.auto_encoder.nope_mask_for_q
+        self.head_rope_dim = self.auto_encoder.head_rope_dim
+        self.head_nope_dim = self.auto_encoder.head_nope_dim
+        self.W_q_rope = nn.Linear(
             self.hidden_size,
-            self.nope_mask.sum().item(),
+            self.num_heads * self.auto_encoder.head_rope_dim,
+            bias=config.attention_bias,
+        )
+        self.W_q_nope = nn.Linear(
+            self.hidden_size,
+            self.num_heads * self.auto_encoder.head_nope_dim,
+            bias=config.attention_bias,
+        )
+        self.W_k_rope = nn.Linear(
+            self.hidden_size,
+            (~self.nope_mask_for_k).sum().item(),
+            bias=config.attention_bias,
+        )
+        self.W_k_nope = nn.Linear(
+            self.hidden_size,
+            self.nope_mask_for_k.sum().item(),
             bias=config.attention_bias,
         )
         self.v_proj = nn.Linear(
@@ -546,16 +301,8 @@ class CustomLlamaAttention(nn.Module):
             self.num_key_value_heads * self.head_dim,
             bias=config.attention_bias,
         )
-        self.W_k_r = nn.Linear(
-            self.hidden_size,
-            (self.nope_mask == False).sum().item(),
-            bias=config.attention_bias,
-        )
         self.o_proj = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias
-        )
-        self.auto_encoder = AUTO_ENCODER_VERSION_MAP[config.AE["version"]](
-            config, layer_idx, self.nope_mask
         )
 
         # TODO (joao): remove in v4.46 (RoPE is computed in the model, not in the decoder layers)
@@ -578,20 +325,20 @@ class CustomLlamaAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         assert not self.config.pretraining_tp > 1, "not support pretraining_tp>1"
         # prepare query_states and k_r
-        query_states = self.q_proj(hidden_states)
-        key_states = torch.zeros(
-            (bsz, q_len, self.num_key_value_heads * self.head_dim),
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
-        )
-        k_r = self.W_k_r(hidden_states)
-        key_states[..., ~self.nope_mask] = k_r
+        q_rope = self.W_q_rope(hidden_states)
+        q_nope = self.W_q_nope(hidden_states)
+        k_rope = self.W_k_rope(hidden_states)
+        k_nope = self.W_k_nope(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
+        q_rope = q_rope.view(bsz, q_len, self.num_heads, self.head_rope_dim).transpose(
+            1, 2
+        )
+        q_nope = q_nope.view(bsz, q_len, self.num_heads, self.head_nope_dim).transpose(
+            1, 2
+        )
+        k_rope = k_rope.view(
+            bsz, q_len, self.num_key_value_heads, self.head_rope_dim
         ).transpose(1, 2)
         if position_embeddings is None:
             logger.warning_once(
@@ -600,51 +347,64 @@ class CustomLlamaAttention(nn.Module):
                 "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
                 "removed and `position_embeddings` will be mandatory."
             )
-            cos, sin = self.rotary_emb(key_states, position_ids)
+            cos, sin = self.rotary_emb(value_states, position_ids)
         else:
             cos, sin = position_embeddings
-        query_states, key_states = self.apply_custom_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
-        key_states = key_states.transpose(1, 2).reshape(bsz, q_len, -1)
-        k_r = key_states[..., ~self.nope_mask]
-        k_nope = self.k_proj(hidden_states)
-        key_states, value_states = self.auto_encoder(
-            k_r=k_r,  # [bsz, q_len, rope_dim]
-            k_nope=k_nope,  # [bsz, q_len, nope_dim]
-            value_states=self.v_proj(
-                hidden_states
-            ),  # [bsz, q_len, num_key_value_heads* head_dim]
-            cache_kwargs={"sin": sin, "cos": cos, "cache_position": cache_position},
+        q_rope, k_rope = self.apply_custom_rotary_pos_emb(
+            q_rope, k_rope, cos, sin
+        )  # [bsz, num_heads, q_len, head_rope_dim]
+        k_rope, k_nope, value_states = self.auto_encoder(
+            k_rope=k_rope,
+            k_nope=k_nope,
+            value_states=value_states,
+            cache_kwargs=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,  # will become mandatory in v4.46
+            position_embeddings=position_embeddings,
             **kwargs,
-        )  # [bsz, seq_len, num_key_value_heads* head_dim]
-
-        key_states = key_states.view(
-            bsz, -1, self.num_key_value_heads, self.head_dim
+        )
+        k_nope = k_nope.view(
+            bsz, q_len, self.num_key_value_heads, self.head_nope_dim
         ).transpose(1, 2)
         value_states = value_states.view(
-            bsz, -1, self.num_key_value_heads, self.head_dim
+            bsz, q_len, self.num_key_value_heads, self.head_dim
         ).transpose(1, 2)
-
+        query_states = torch.cat(
+            [q_rope, q_nope], dim=-1
+        )  # [bsz, num_heads, q_len, head_dim]
+        key_states = torch.cat(
+            [k_rope, k_nope], dim=-1
+        )  # [bsz, num_key_value_heads, q_len, head_dim]
         return query_states, key_states, value_states
 
-    def apply_custom_rotary_pos_emb(self, query_states, key_states, cos, sin):
-        if self.config.RoPE["partial_rope_version"] == 4:
-            query_states, key_states = modeling_llama.apply_rotary_pos_emb(
-                query_states, key_states, cos, sin, layer_idx=self.layer_idx
-            )
-        else:
-            query_states, key_states = modeling_llama.apply_rotary_pos_emb(
-                query_states, key_states, cos, sin
-            )
-        return query_states, key_states
+    def apply_custom_rotary_pos_emb(self, q_rope, k_rope, cos, sin, unsqueeze_dim=1):
+        assert unsqueeze_dim == 1, "Unsqueeze_dim should be 1"
+        rotary_mask_for_k = (~self.nope_mask_for_k).view(
+            1, self.num_key_value_heads, 1, self.head_dim
+        )
+        cos = cos.unsqueeze(unsqueeze_dim).repeat_interleave(
+            self.num_key_value_heads, unsqueeze_dim
+        )
+        sin = sin.unsqueeze(unsqueeze_dim).repeat_interleave(
+            self.num_key_value_heads, unsqueeze_dim
+        )
+        bsz, num_heads, q_len, _ = cos.size()
+        rotary_mask_for_k = rotary_mask_for_k.expand_as(cos)
+        cos = cos[rotary_mask_for_k].view(bsz, num_heads, q_len, -1)
+        sin = sin[rotary_mask_for_k].view(bsz, num_heads, q_len, -1)
+        k_embed = (k_rope * cos) + (rotate_half(k_rope) * sin)
+        cos = cos.repeat_interleave(
+            self.num_key_value_groups, unsqueeze_dim
+        )  # [1, num_heads, q_len, head_rope_dim]
+        sin = sin.repeat_interleave(
+            self.num_key_value_groups, unsqueeze_dim
+        )  # [1, num_heads, q_len, head_rope_dim]
+        q_embed = (q_rope * cos) + (rotate_half(q_rope) * sin)
+        return q_embed, k_embed
 
     def forward(
         self,
@@ -914,86 +674,6 @@ class CustomLlamaSdpaAttention(CustomLlamaAttention):
         return attn_output, None, past_key_value
 
 
-def state_dict_svd_init(model, state_dict):
-    for layer_idx in range(model.config.num_hidden_layers):
-        nope_mask = IndexForNope.get_index_for_nope(
-            rope_cfg=model.config.RoPE,
-            head_dim=model.config.hidden_size // model.config.num_attention_heads,
-            head_num=model.config.num_key_value_heads,
-            layer_idx=layer_idx,
-        )
-        assert (nope_mask == model.model.layers[layer_idx].self_attn.nope_mask).all()
-        W_k = state_dict.pop(f"model.layers.{layer_idx}.self_attn.k_proj.weight").t()
-        W_v = state_dict.pop(f"model.layers.{layer_idx}.self_attn.v_proj.weight").t()
-        state_dict[f"model.layers.{layer_idx}.self_attn.W_k_r.weight"] = W_k[
-            ..., ~nope_mask
-        ].t()
-        W_down_k, W_up_k, W_down_v, W_up_v = SvdInit.init(
-            W_k[..., nope_mask],
-            W_v,
-            svd_method=model.config.SVD["method"],
-            r=model.config.SVD["low_rank"] * model.config.num_key_value_heads,
-        )
-        state_dict[f"model.layers.{layer_idx}.self_attn.W_down_k.weight"] = W_down_k
-        state_dict[f"model.layers.{layer_idx}.self_attn.W_up_k.weight"] = W_up_k
-        if not model.model.layers[layer_idx].self_attn.is_share_W_down:
-            state_dict[f"model.layers.{layer_idx}.self_attn.W_down_v.weight"] = W_down_v
-        state_dict[f"model.layers.{layer_idx}.self_attn.W_up_v.weight"] = W_up_v
-    return state_dict
-
-
-@classmethod
-def custom_load_pretrained_model(
-    cls,
-    model,
-    state_dict,
-    loaded_keys,
-    resolved_archive_file,
-    pretrained_model_name_or_path,
-    ignore_mismatched_sizes=False,
-    sharded_metadata=None,
-    _fast_init=True,
-    low_cpu_mem_usage=False,
-    device_map=None,
-    offload_folder=None,
-    offload_state_dict=None,
-    dtype=None,
-    hf_quantizer=None,
-    keep_in_fp32_modules=None,
-    gguf_path=None,
-    weights_only=True,
-):
-    if all(["W_k_r" not in k for k in state_dict.keys()]) and isinstance(
-        model.model, modeling_llama.LlamaPreTrainedModel
-    ):
-        # replace the original llama weights with the mla weights
-        state_dict = state_dict_svd_init(model, state_dict)
-        loaded_keys = list(state_dict.keys())
-    old_k_r_weight = model.model.layers[0].self_attn.W_k_r.weight
-    outputs = cls.original_load_pretrained_model(
-        model,
-        state_dict,
-        loaded_keys,
-        resolved_archive_file,
-        pretrained_model_name_or_path,
-        ignore_mismatched_sizes,
-        sharded_metadata,
-        _fast_init,
-        low_cpu_mem_usage,
-        device_map,
-        offload_folder,
-        offload_state_dict,
-        dtype,
-        hf_quantizer,
-        keep_in_fp32_modules,
-        gguf_path,
-        weights_only,
-    )
-    new_k_r_weight = model.model.layers[0].self_attn.W_k_r.weight
-    assert not (old_k_r_weight == new_k_r_weight).all()
-    return outputs
-
-
 def ae_patch_func_hf(rope_cfg=None):
     modeling_llama.LLAMA_ATTENTION_CLASSES = {
         "eager": CustomLlamaAttention,
@@ -1001,14 +681,11 @@ def ae_patch_func_hf(rope_cfg=None):
         "sdpa": CustomLlamaSdpaAttention,
     }
 
-    # if not hasattr(modeling_llama.LlamaPreTrainedModel, 'original_load_pretrained_model'):
-    #     modeling_llama.LlamaPreTrainedModel.original_load_pretrained_model = modeling_llama.LlamaPreTrainedModel._load_pretrained_model
-    #     modeling_llama.LlamaPreTrainedModel._load_pretrained_model = custom_load_pretrained_model
+    # Should use partial_rope for Init?
+    # if rope_cfg is not None:
+    #     # replace apply_rotary_pos_emb function in llama model
+    #     from ..partial_rope.patch_func_hf import create_custom_apply_rotary_pos_emb_hf
 
-    if rope_cfg is not None:
-        # replace apply_rotary_pos_emb function in llama model
-        from ..partial_rope.patch_func_hf import create_custom_apply_rotary_pos_emb_hf
-
-        modeling_llama.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb_hf(
-            rope_cfg
-        )
+    #     modeling_llama.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb_hf(
+    #         rope_cfg
+    #     )
