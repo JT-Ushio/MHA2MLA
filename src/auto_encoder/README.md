@@ -7,7 +7,7 @@ Init command:
 ```bash
 torchrun --nproc_per_node ${N_GPU} \
     src/auto_encoder/init.py \
-    --config_file configs/ae/init.yaml && \
+    --config_file configs/ae/init.yaml
 ```
 
 ## Train Model with AutoEncoder Module
