@@ -10,6 +10,58 @@ class MHA2MLAModelArguments:
         default=None,
         metadata={"help": "Path to pretrained model"},
     )
+    partial_rope_version: str = field(
+        default="high",
+        metadata={
+            "help": "RoPE version to use for partial RoPE in MLA. Options: 'high', 'low', 'uniform', '2-norm'"
+        },
+    )
+    rope_dim_for_mla: int = field(
+        default=0, metadata={"help": "Number of rope dimensions per head"}
+    )
+    uniform_start_point: int = field(
+        default=0,
+        metadata={
+            "help": "Starting point (only used when partial_rope_version='uniform')"
+        },
+    )
+    num_query_heads_div_key_heads: int = field(
+        default=1, metadata={"help": "Ratio of query heads to key heads"}
+    )
+    qk_tensor_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to pre-computed QK tensor file, e.g., 'utils/qk_tensor_135M.pth'"
+        },
+    )
+    svd_init_method: str = field(
+        default="none",
+        metadata={
+            "help": "Method for SVD initialization. Options: 'split' or 'joint' or 'none'"
+        },
+    )
+    low_rank: int = field(
+        default=8, metadata={"help": "Rank for low-rank approximation in MLA"}
+    )
+
+    def __post_init__(self):
+        # Call parent class __post_init__ first to ensure any parent validation happens
+        if hasattr(super(), "__post_init__"):
+            super().__post_init__()
+
+        # Validate partial_rope_version
+        valid_rope_versions = ["high", "low", "uniform", "2-norm"]
+        if self.partial_rope_version not in valid_rope_versions:
+            raise ValueError(
+                f"partial_rope_version must be one of {valid_rope_versions}, got '{self.partial_rope_version}'"
+            )
+
+        # Validate svd_init_method
+        valid_svd_methods = ["none", "split", "joint"]
+        if self.svd_init_method not in valid_svd_methods:
+            raise ValueError(
+                f"svd_init_method must be one of {valid_svd_methods}, got '{self.svd_init_method}'"
+            )
 
 
 @dataclass

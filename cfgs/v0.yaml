@@ -1,7 +1,7 @@
-partial_rope_version: 0  # 0 1 2 3 4 5
-top_k_rope_dim: 0
-last_k_rope_dim: 0
-uniform_start_point: 0
-uniform_step: 1
-qk_tensor_path: null
-n_gqa_group: 3
+partial_rope_version: 'high'  # 'high' or 'low' or 'uniform' or '2-norm'
+k_rope_dim_per_head: 8
+uniform_start_point: 0        # optional only for 'uniform'
+num_query_heads_div_key_heads: 1
+qk_tensor_path: null # null or '../utils/qk_tensor_135M.pth'
+svd_init_method: 'split'  # 'split' or 'joint'
+low_rank: 8
