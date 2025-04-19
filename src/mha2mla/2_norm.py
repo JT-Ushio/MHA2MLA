@@ -86,7 +86,7 @@ def main():
     )
     num = args.sample_size
     model.eval()
-    model.to("cuda")
+    model.to("cuda",dtype=torch.bfloat16)
     for name, module in model.named_modules():
         from transformers.models.llama.modeling_llama import LlamaAttention
         if not isinstance(module, LlamaAttention):
@@ -129,10 +129,10 @@ def main():
     key_states = torch.mean(key_states,dim=1,keepdim=False)
     group_size = model_config.num_attention_heads // model_config.num_key_value_heads
     key_states = key_states.unsqueeze(2).expand(num_layers,model_config.num_key_value_heads,group_size,model_config.head_dim//2).reshape(num_layers,model_config.num_attention_heads,head_dim//2) # [num_layers,num_heads,head_dim//2]
-    qk_states = query_states + key_states
+    qk_states = query_states * key_states
     if group_size > 1:
         qk_states = qk_states.reshape(num_layers,model_config.num_key_value_heads,group_size,head_dim//2).sum(dim=2,keepdim=False)
-    with open(args.output_dir,"wb") as f:
+    with open(os.path.join(args.output_dir,"qk_tensor.pth"),"wb") as f:
         torch.save(qk_states,f)
 
 if __name__ == "__main__":

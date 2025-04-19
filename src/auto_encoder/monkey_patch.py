@@ -182,7 +182,7 @@ class AutoEncoder(nn.Module):
         )
         self.head_rope_dim = self.head_dim - self.head_nope_dim
         self.W_down = nn.Linear(
-            config.num_key_value_heads * (self.head_nope_dim + self.head_dim),
+            config.num_key_value_heads * self.head_nope_dim + config.num_key_value_heads * self.head_dim,
             config.auto_encoder["low_rank_per_head"] * config.num_key_value_heads,
             bias=False,
         )
@@ -681,11 +681,5 @@ def ae_patch_func_hf(rope_cfg=None):
         "sdpa": CustomLlamaSdpaAttention,
     }
 
-    # Should use partial_rope for Init?
-    # if rope_cfg is not None:
-    #     # replace apply_rotary_pos_emb function in llama model
-    #     from ..partial_rope.patch_func_hf import create_custom_apply_rotary_pos_emb_hf
 
-    #     modeling_llama.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb_hf(
-    #         rope_cfg
-    #     )
+

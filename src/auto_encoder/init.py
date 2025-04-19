@@ -203,13 +203,17 @@ class AutoEncoderInitTrainer(Trainer):
             use_cache=False,
             **inputs,
         )
+        _ = self.model(
+            use_cache=False,
+            **inputs,
+        )
         current_step = self.state.global_step
         max_steps = self.args.max_steps
-        assert max_steps % self.model.config.num_hidden_layers == 0
+        # assert max_steps % self.model.config.num_hidden_layers == 0
         block_step = max_steps // self.model.config.num_hidden_layers
         current_idx = current_step // block_step + 1
         all_loss = []
-        for layer_idx in range(current_idx):
+        for layer_idx in range(min(current_idx, self.model.config.num_hidden_layers)):
             layer = self.original_model.model.layers[layer_idx]
             target_ae = self.model.model.layers[layer_idx].self_attn.auto_encoder
             original_key_states, original_value_states = self.original_kv_func(
@@ -217,8 +221,8 @@ class AutoEncoderInitTrainer(Trainer):
             )
             original_k_nope = original_key_states[..., target_ae.nope_mask_for_k]
             bsz, q_len, _ = original_key_states.shape
-            k_nope = self.ae_output[layer_idx][1].unsqueeze(1)
-            value_states = self.ae_output[layer_idx][2].unsqueeze(1)
+            k_nope = self.ae_output[layer_idx][1].squeeze(1)
+            value_states = self.ae_output[layer_idx][2].squeeze(1)
             k_loss = self.loss_func(original_k_nope, k_nope)
             v_loss = self.loss_func(original_value_states, value_states)
             layer_loss = (k_loss + v_loss) / (bsz * q_len)
