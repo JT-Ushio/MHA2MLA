@@ -50,7 +50,7 @@ def patch_model(model, model_args, mha2mla_args):
         q_indices = reorder_matrix_rows(q_mask, is_cat=True)
         layer.self_attn.q_proj.weight.data.copy_(q_weight[q_indices])
         if q_bias is not None:
-            layer.self_attn.q_proj.bias.data.copy_(q_bias[q_indices])
+            layer.self_attn.q_rerank_proj.bias.data.copy_(q_bias[q_indices])
 
         # 2. Reorder k_proj and setup k_r_proj
         # Get original weights and biases if biases exist
@@ -76,12 +76,24 @@ def patch_model(model, model_args, mha2mla_args):
             method=mha2mla_args.svd_init_method,
         )
         layer.self_attn.kv_proj = kv_proj
+        down_kv_weight = layer.self_attn.kv_proj.down_kv.weight
+        up_k_weight = layer.self_attn.kv_proj.up_k.weight
+        up_v_weight = layer.self_attn.kv_proj.up_v.weight
+        new_k = up_k_weight @ down_kv_weight
+        new_v = up_v_weight @ down_kv_weight
+        old_v = layer.self_attn.v_proj.weight
+        # print('old_v', old_v)
+        # print('new_v', new_v)
+        # print('dist', torch.dist(old_v, new_v))
+
+        # sys.exit()
 
         # 4. Delete original k_proj and v_proj
         delattr(layer.self_attn, "k_proj")
         delattr(layer.self_attn, "v_proj")
 
-        q_idx.append(q_indices[: k_r_indices.size(0)])
+        d_q_r = model_args.num_attention_heads * mha2mla_args.rope_dim_for_mla
+        q_idx.append(q_indices[:d_q_r])
         k_idx.append(k_r_indices)
         print(f"Layer {layer_idx}: Set up q_proj, k_r_proj, and kv_proj")
     return model, q_idx, k_idx

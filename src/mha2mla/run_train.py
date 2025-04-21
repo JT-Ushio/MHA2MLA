@@ -1,22 +1,17 @@
-import torch
-import os
 import sys
 import argparse
 
+import torch
 from transformers import (
     AutoConfig,
     AutoTokenizer,
     AutoModelForCausalLM,
+    Qwen2ForCausalLM,
+    LlamaForCausalLM,
     HfArgumentParser,
     DataCollatorForLanguageModeling,
     Trainer,
 )
-from transformers.models.qwen2 import modeling_qwen2
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2SdpaAttention,
-    Qwen2RotaryEmbedding,
-)
-
 from arguments import (
     MHA2MLAModelArguments,
     MHA2MLADataArguments,
@@ -24,12 +19,8 @@ from arguments import (
 )
 from helpers import load_dataset, load_optimizer_scheduler
 from patching_model_load import patch_model
-from patching_qwen2 import (
-    mha2mla_qwen2
-    # custom_Qwen2SdpaAttention_forward,
-    # custom_Qwen2RotaryEmbedding_forward,
-    # create_custom_apply_rotary_pos_emb,
-)
+from patching_qwen2 import mha2mla_qwen2
+from patching_llama import mha2mla_llama
 
 
 def main():
@@ -43,14 +34,14 @@ def main():
     name = mha2mla_args.model_name_or_path
     model_args = AutoConfig.from_pretrained(name)
     tokenizer = AutoTokenizer.from_pretrained(name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     mha_model = AutoModelForCausalLM.from_pretrained(name)
     mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-    mha2mla_qwen2(q_idx, k_idx)
-    # Qwen2SdpaAttention.forward = custom_Qwen2SdpaAttention_forward
-    # Qwen2RotaryEmbedding.forward = custom_Qwen2RotaryEmbedding_forward
-    # modeling_qwen2.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb(
-    #     q_idx, k_idx
-    # )
+    if isinstance(mha_model, LlamaForCausalLM):
+        mha2mla_llama(q_idx, k_idx)
+    elif isinstance(mha_model, Qwen2ForCausalLM):
+        mha2mla_qwen2(q_idx, k_idx)
     print(model_args, mha2mla_args)
     print(mha_model, mla_model)
 
@@ -75,8 +66,6 @@ def main():
     if resume_from_checkpoint is not None:
         trainer.train(resume_from_checkpoint)
     else:
-        # if int(os.getenv("LOCAL_RANK", 0)) == 0 and train_args.save_initial_model:
-        #     trainer._save_checkpoint()
         trainer.train()
 
 

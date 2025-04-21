@@ -1,3 +1,4 @@
+import sys
 import inspect
 from typing import Optional, Tuple
 
@@ -51,7 +52,6 @@ def create_custom_apply_rotary_pos_emb(q_r_indices, k_r_indices):
         sin_q = sin.repeat(1, 1, q.size(1)).index_select(-1, q_idx)
         cos_q = cos_q.reshape(1, q.size(2), q.size(1), -1).transpose(1, 2)
         sin_q = sin_q.reshape(1, q.size(2), q.size(1), -1).transpose(1, 2)
-
         k_idx = k_r_indices[layer_idx].to(k.device)
         cos_k = cos.repeat(1, 1, k.size(1)).index_select(-1, k_idx)
         sin_k = sin.repeat(1, 1, k.size(1)).index_select(-1, k_idx)
@@ -105,18 +105,18 @@ def custom_LlamaSdpaAttention_forward(
     key_r_states = self.k_r_proj(hidden_states)
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
-
-    query_states = query_states.view(
-        bsz, q_len, self.num_heads, self.head_dim
-    ).transpose(1, 2)
+    # print('query_states: ', query_states.size())
+    # sys.exit()
     key_r_states = key_r_states.view(
         bsz, q_len, self.num_key_value_heads, -1
     ).transpose(1, 2)
     key_c_states = key_c_states.view(
         bsz, q_len, self.num_key_value_heads, -1
     ).transpose(1, 2)
-    query_r_states = query_states[..., : key_r_states.size(-1)]
-    query_c_states = query_states[..., key_r_states.size(-1) :]
+    query_r_states = query_states[..., :self.num_heads*key_r_states.size(-1)]
+    query_c_states = query_states[..., self.num_heads*key_r_states.size(-1):]
+    query_r_states = query_r_states.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
+    query_c_states = query_c_states.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
     value_states = value_states.view(
         bsz, q_len, self.num_key_value_heads, self.head_dim
     ).transpose(1, 2)
@@ -135,6 +135,30 @@ def custom_LlamaSdpaAttention_forward(
     )
     query_states = torch.cat([query_r_states, query_c_states], dim=-1)
     key_states = torch.cat([key_r_states, key_c_states], dim=-1)
+    # key_states = repeat_kv(key_states, self.num_key_value_groups)
+
+    # query_states = self.q_proj(hidden_states)
+    # key_states = self.k_proj(hidden_states) 
+    # query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    # key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    # query_states = query_states[..., ::8]
+    # key_states = key_states[..., ::8]
+    # cos, sin = position_embeddings
+    # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    # key_states = repeat_kv(key_states, self.num_key_value_groups)
+
+    # print(query_r_states.size(), query_states.size())
+    # print(query_r_states[0, :, 0, :])
+    # print(query_states[0, :, 0, :])
+    # print('equal(query_r_states, query_states): ', torch.allclose(query_r_states, query_states))
+    # diff = (query_r_states - query_states).abs()
+    # print("最大绝对误差：", diff.max())
+    # print(key_r_states.size(), key_states.size())
+    # attn_scores = torch.matmul(query_states, key_states.transpose(-2, -1))
+    # print('equal(key_r_states, key_states): ', torch.allclose(key_r_states, key_states))
+    # print('equal(new_attn_scores, attn_scores): ', torch.allclose(new_attn_scores, attn_scores))
+    # sys.exit()
+
 
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache

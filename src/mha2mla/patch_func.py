@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn as nn
 import numpy as np
@@ -13,7 +14,9 @@ def partial_rope_mask(model_args, mha2mla_args):
     n_head = model_args.num_attention_heads
     n_k_head = model_args.num_key_value_heads
     d_head = model_args.hidden_size // n_head
+    d_head_half = d_head // 2
     rope_dim_for_mla = mha2mla_args.rope_dim_for_mla
+    rope_dim_for_mla_half = rope_dim_for_mla // 2
     rope_version = mha2mla_args.partial_rope_version
     mask = np.zeros(d_head)
 
@@ -23,7 +26,8 @@ def partial_rope_mask(model_args, mha2mla_args):
         Returns:
             mask: Binary mask with 1s for the first rope_dim_for_mla dimensions
         """
-        mask[:rope_dim_for_mla] = 1.0
+        mask[:rope_dim_for_mla_half] = 1.0
+        mask[d_head_half : d_head_half + rope_dim_for_mla_half] = 1.0
         q_masks = np.tile(mask, n_head)
         k_masks = np.tile(mask, n_k_head)
         return q_masks, k_masks
@@ -34,7 +38,8 @@ def partial_rope_mask(model_args, mha2mla_args):
         Returns:
             mask: Binary mask with 1s for the last rope_dim_for_mla dimensions
         """
-        mask[d_head - rope_dim_for_mla :] = 1.0
+        mask[d_head - rope_dim_for_mla_half :] = 1.0
+        mask[d_head_half - rope_dim_for_mla_half : d_head_half] = 1.0
         q_masks = np.tile(mask, n_head)
         k_masks = np.tile(mask, n_k_head)
         return q_masks, k_masks
@@ -45,16 +50,16 @@ def partial_rope_mask(model_args, mha2mla_args):
         Returns:
             mask: Binary mask with 1s at uniformly spaced positions
         """
-        assert rope_dim_for_mla > 0, "rope_dim_for_mla must be greater than 0"
-
         step = d_head // rope_dim_for_mla
+        assert d_head_half % step == 0, "rope_dim_for_mla must be greater than 0"
+
         for i in range(start_point, d_head, step):
             mask[i] = 1.0
         q_masks = np.tile(mask, n_head)
         k_masks = np.tile(mask, n_k_head)
         return q_masks, k_masks
 
-    def select_2norm_frequency(mask):
+    def select_2norm_frequency(mask, rope_dim_for_mla):
         """
         Select dimensions based on 2-norm frequency importance
         Returns:
@@ -63,7 +68,17 @@ def partial_rope_mask(model_args, mha2mla_args):
         # This is a placeholder implementation since the exact 2-norm selection
         # method was not detailed in the comments. In practice, this would
         # require statistics from the weight matrices to determine importance.
-        return mask
+        with open(mha2mla_args.qk_tensor_path, "rb") as fin:
+            qk_norm = torch.load(fin)
+        # print(out["ranks"].size())
+        # print(qk_norm["ranks"].size())
+        # print(qk_norm["ranks"][0][0])
+        # sys.exit()
+        k_masks = qk_norm["ranks"] < rope_dim_for_mla_half
+        q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=-1)
+        k_masks = k_masks.reshape(k_masks.size(0), -1)
+        q_masks = q_masks.reshape(q_masks.size(0), -1)
+        return q_masks, k_masks
 
     if rope_version == "high":
         return select_high_frequency(mask)
@@ -83,14 +98,19 @@ class LowRankKVLinear(nn.Module):
     up of shape (low_rank, out_features), such that W ≈ up.T @ down.T
     """
 
-    def __init__(self, d_kv_in, d_kv_mid, d_k_out=0, d_v_out=0, bias=None):
+    def __init__(
+        self, d_kv_in, d_kv_mid=0, d_k_mid=0, d_k_out=0, d_v_mid=0, d_v_out=0, bias=None
+    ):
         super().__init__()
         # TODO: add activations after down_kv
         self.down_kv = nn.Linear(in_features=d_kv_in, out_features=d_kv_mid, bias=False)
-        if d_k_out:
-            self.up_k = nn.Linear(in_features=d_kv_mid, out_features=d_k_out, bias=bias)
-        if d_v_out:
-            self.up_v = nn.Linear(in_features=d_kv_mid, out_features=d_v_out, bias=bias)
+        if d_k_mid and d_k_out:
+            self.up_k = nn.Linear(in_features=d_k_mid, out_features=d_k_out, bias=bias)
+        if d_v_mid and d_v_out:
+            self.up_v = nn.Linear(in_features=d_v_mid, out_features=d_v_out, bias=bias)
+        self.d_kv_mid = d_kv_mid
+        self.d_k_mid, self.d_v_mid = d_k_mid, d_v_mid
+        self.d_k_out, self.d_v_out = d_k_out, d_v_out
 
     def reset_parameters(
         self,
@@ -113,8 +133,15 @@ class LowRankKVLinear(nn.Module):
     def mha_forward(self, x):
         # x: (batch_size, seq_len, in_features)
         kv = self.down_kv(x)
-        k = self.up_k(kv)
-        v = self.up_v(kv)
+        d_kv, d_k, d_v = self.d_kv_mid, self.d_k_mid, self.d_v_mid
+        if hasattr(self, "up_k"):
+            k = self.up_k(kv) if d_kv == d_k else self.up_k(kv[:d_k])
+        else:
+            k = kv[..., : self.d_k_out]
+        if hasattr(self, "up_v"):
+            v = self.up_v(kv) if d_kv == d_v else self.up_v(kv[-d_v:])
+        else:
+            v = kv[..., -self.d_v_out :]
         return k, v
 
     def mla_forward(self, x, q_hid, o_hid):
@@ -124,11 +151,9 @@ class LowRankKVLinear(nn.Module):
 
 
 def SVD(X, r):
-    U, S, V = torch.svd(X)
-    U, S, V = U[:, :r], S[:r], V[:, :r]
-    S_half = torch.diag(torch.sqrt(S))
-    U @= S_half
-    V = S_half @ V.t()
+    U, S, V = torch.linalg.svd(X, full_matrices=False)
+    U, S, V = U[:, :r], S[:r], V[:r, :]
+    U @= torch.diag(S)
     return V, U
 
 
@@ -136,25 +161,40 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
     d_k_c, d_v, d_kv_in = k_c_weight.size(0), v_weight.size(0), v_weight.size(1)
     if method == "only_key":
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
+        up_v = None
         down_kv = torch.cat([down_k, v_weight], dim=0)
+        d_k_mid = d_kv_mid
         d_kv_mid += d_v
-        d_v = 0
+        d_v_mid = d_v = 0
     elif method == "only_value":
         down_v, up_v = SVD(v_weight, d_kv_mid)
+        up_k = None
         down_kv = torch.cat([k_c_weight, down_v])
+        d_v_mid = d_kv_mid
         d_kv_mid += d_k_c
-        d_k_c = 0
+        d_k_mid = d_k_c = 0
     elif method == "split":
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
         down_v, up_v = SVD(v_weight, d_kv_mid)
         down_kv = torch.cat([down_k, down_v])
+        d_k_mid = d_v_mid = d_kv_mid
         d_kv_mid *= 2
     elif method == "joint":
         joint_kv = torch.cat([k_c_weight, v_weight])
         down_kv, up_kv = SVD(joint_kv, d_kv_mid)
         up_k, up_v = up_kv.split([d_k_c, d_v])
+        d_k_mid = d_v_mid = d_kv_mid
+    elif method == "none":
+        down_kv = torch.cat([k_c_weight, v_weight])
+        up_k = up_v = None
+        d_kv_mid = d_k_c + d_v
+        d_k_mid = d_v_mid = 0
+    print("down_kv", down_kv.size())
+    print("up_kv", up_kv.size())
+    print("up_k", up_k.size())
+    print("up_v", up_v.size())
 
     has_bias = k_c_bias is not None
-    kv_proj = LowRankKVLinear(d_kv_in, d_kv_mid, d_k_c, d_v, has_bias)
+    kv_proj = LowRankKVLinear(d_kv_in, d_kv_mid, d_k_mid, d_k_c, d_v_mid, d_v, has_bias)
     kv_proj.reset_parameters(down_kv, up_k, up_v, k_c_bias, v_bias)
     return kv_proj

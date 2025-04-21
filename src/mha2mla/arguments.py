@@ -25,9 +25,9 @@ class MHA2MLAModelArguments:
             "help": "Starting point (only used when partial_rope_version='uniform')"
         },
     )
-    num_query_heads_div_key_heads: int = field(
-        default=1, metadata={"help": "Ratio of query heads to key heads"}
-    )
+    # num_query_heads_div_key_heads: int = field(
+    #     default=1, metadata={"help": "Ratio of query heads to key heads"}
+    # )
     qk_tensor_path: Optional[str] = field(
         default=None,
         metadata={

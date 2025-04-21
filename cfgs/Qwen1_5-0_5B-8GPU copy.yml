@@ -1,6 +1,6 @@
 # TrainingArguments
 seed: 42
-max_steps: 12000
+max_steps: 18000
 report_to: wandb
 run_name: hf_test
 save_strategy: steps
