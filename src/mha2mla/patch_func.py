@@ -75,7 +75,7 @@ def partial_rope_mask(model_args, mha2mla_args):
         # print(qk_norm["ranks"][0][0])
         # sys.exit()
         k_masks = qk_norm["ranks"] < rope_dim_for_mla_half
-        q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=-1)
+        q_masks = k_masks #.repeat_interleave(n_head // n_k_head, dim=-1)
         k_masks = k_masks.reshape(k_masks.size(0), -1)
         q_masks = q_masks.reshape(q_masks.size(0), -1)
         return q_masks, k_masks

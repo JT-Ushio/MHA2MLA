@@ -37,6 +37,7 @@ def patch_model(model, model_args, mha2mla_args):
         low_rank: The rank for the low-rank approximation of v_proj
     """
     q_masks, k_masks = partial_rope_mask(model_args, mha2mla_args)
+    n_k_head, n_head = model_args.num_key_value_heads, model_args.num_attention_heads
     q_idx = []
     k_idx = []
     for layer_idx, layer in enumerate(model.model.layers):
@@ -61,6 +62,11 @@ def patch_model(model, model_args, mha2mla_args):
         k_mask = k_masks[layer_idx] if len(k_masks.shape) == 2 else k_masks
         k_r_indices, k_c_indices = reorder_matrix_rows(k_mask, is_cat=False)
         k_r_proj = nn.Linear(k_weight.size(1), k_r_indices.size(0), k_bias is not None)
+        k_weight = (
+            k_weight.view(n_k_head, -1, k_weight.size(1))
+            .repeat_interleave(n_head // n_k_head, dim=1)
+            .reshape(-1, k_weight.size(1))
+        )
         k_r_proj.weight.data.copy_(k_weight[k_r_indices])
         if k_bias is not None:
             k_r_proj.bias.data.copy_(k_bias[k_r_indices])
@@ -82,9 +88,6 @@ def patch_model(model, model_args, mha2mla_args):
         new_k = up_k_weight @ down_kv_weight
         new_v = up_v_weight @ down_kv_weight
         old_v = layer.self_attn.v_proj.weight
-        # print('old_v', old_v)
-        # print('new_v', new_v)
-        # print('dist', torch.dist(old_v, new_v))
 
         # sys.exit()
 
@@ -92,7 +95,7 @@ def patch_model(model, model_args, mha2mla_args):
         delattr(layer.self_attn, "k_proj")
         delattr(layer.self_attn, "v_proj")
 
-        d_q_r = model_args.num_attention_heads * mha2mla_args.rope_dim_for_mla
+        d_q_r = n_head * mha2mla_args.rope_dim_for_mla
         q_idx.append(q_indices[:d_q_r])
         k_idx.append(k_r_indices)
         print(f"Layer {layer_idx}: Set up q_proj, k_r_proj, and kv_proj")
