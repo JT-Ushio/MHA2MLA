@@ -130,36 +130,13 @@ def custom_LlamaSdpaAttention_forward(
         cos, sin = self.rotary_emb(value_states, position_ids)
     else:
         cos, sin = position_embeddings
-    key_r_states = repeat_kv(key_r_states, self.num_key_value_groups)
+    # key_r_states = repeat_kv(key_r_states, self.num_key_value_groups)
     query_r_states, key_r_states = modeling_llama.apply_rotary_pos_emb(
         query_r_states, key_r_states, cos, sin
     )
     query_states = torch.cat([query_r_states, query_c_states], dim=-1)
-    key_c_states = repeat_kv(key_c_states, self.num_key_value_groups)
+    # key_c_states = repeat_kv(key_c_states, self.num_key_value_groups)
     key_states = torch.cat([key_r_states, key_c_states], dim=-1)
-
-    # query_states = self.q_proj(hidden_states)
-    # key_states = self.k_proj(hidden_states) 
-    # query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-    # key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-    # query_states = query_states[..., ::8]
-    # key_states = key_states[..., ::8]
-    # cos, sin = position_embeddings
-    # query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-    # key_states = repeat_kv(key_states, self.num_key_value_groups)
-
-    # print(query_r_states.size(), query_states.size())
-    # print(query_r_states[0, :, 0, :])
-    # print(query_states[0, :, 0, :])
-    # print('equal(query_r_states, query_states): ', torch.allclose(query_r_states, query_states))
-    # diff = (query_r_states - query_states).abs()
-    # print("最大绝对误差：", diff.max())
-    # print(key_r_states.size(), key_states.size())
-    # attn_scores = torch.matmul(query_states, key_states.transpose(-2, -1))
-    # print('equal(key_r_states, key_states): ', torch.allclose(key_r_states, key_states))
-    # print('equal(new_attn_scores, attn_scores): ', torch.allclose(new_attn_scores, attn_scores))
-    # sys.exit()
-
 
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -168,7 +145,7 @@ def custom_LlamaSdpaAttention_forward(
             key_states, value_states, self.layer_idx, cache_kwargs
         )
 
-    # key_states = repeat_kv(key_states, self.num_key_value_groups)
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     causal_mask = attention_mask

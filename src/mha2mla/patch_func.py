@@ -70,12 +70,9 @@ def partial_rope_mask(model_args, mha2mla_args):
         # require statistics from the weight matrices to determine importance.
         with open(mha2mla_args.qk_tensor_path, "rb") as fin:
             qk_norm = torch.load(fin)
-        # print(out["ranks"].size())
-        # print(qk_norm["ranks"].size())
-        # print(qk_norm["ranks"][0][0])
-        # sys.exit()
+
         k_masks = qk_norm["ranks"] < rope_dim_for_mla_half
-        q_masks = k_masks #.repeat_interleave(n_head // n_k_head, dim=-1)
+        q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=-1)
         k_masks = k_masks.reshape(k_masks.size(0), -1)
         q_masks = q_masks.reshape(q_masks.size(0), -1)
         return q_masks, k_masks
@@ -146,7 +143,7 @@ class LowRankKVLinear(nn.Module):
 
     def mla_forward(self, x, q_hid, o_hid):
         kv = self.down_kv(x)
-        # TODO:
+        # TODO: Triton kernel
         return kv
 
 
@@ -189,10 +186,6 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
         up_k = up_v = None
         d_kv_mid = d_k_c + d_v
         d_k_mid = d_v_mid = 0
-    print("down_kv", down_kv.size())
-    print("up_kv", up_kv.size())
-    print("up_k", up_k.size())
-    print("up_v", up_v.size())
 
     has_bias = k_c_bias is not None
     kv_proj = LowRankKVLinear(d_kv_in, d_kv_mid, d_k_mid, d_k_c, d_v_mid, d_v, has_bias)

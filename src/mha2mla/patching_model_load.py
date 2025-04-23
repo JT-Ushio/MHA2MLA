@@ -62,11 +62,6 @@ def patch_model(model, model_args, mha2mla_args):
         k_mask = k_masks[layer_idx] if len(k_masks.shape) == 2 else k_masks
         k_r_indices, k_c_indices = reorder_matrix_rows(k_mask, is_cat=False)
         k_r_proj = nn.Linear(k_weight.size(1), k_r_indices.size(0), k_bias is not None)
-        k_weight = (
-            k_weight.view(n_k_head, -1, k_weight.size(1))
-            .repeat_interleave(n_head // n_k_head, dim=1)
-            .reshape(-1, k_weight.size(1))
-        )
         k_r_proj.weight.data.copy_(k_weight[k_r_indices])
         if k_bias is not None:
             k_r_proj.bias.data.copy_(k_bias[k_r_indices])
@@ -82,14 +77,12 @@ def patch_model(model, model_args, mha2mla_args):
             method=mha2mla_args.svd_init_method,
         )
         layer.self_attn.kv_proj = kv_proj
-        down_kv_weight = layer.self_attn.kv_proj.down_kv.weight
-        up_k_weight = layer.self_attn.kv_proj.up_k.weight
-        up_v_weight = layer.self_attn.kv_proj.up_v.weight
-        new_k = up_k_weight @ down_kv_weight
-        new_v = up_v_weight @ down_kv_weight
-        old_v = layer.self_attn.v_proj.weight
-
-        # sys.exit()
+        # down_kv_weight = layer.self_attn.kv_proj.down_kv.weight
+        # up_k_weight = layer.self_attn.kv_proj.up_k.weight
+        # up_v_weight = layer.self_attn.kv_proj.up_v.weight
+        # new_k = up_k_weight @ down_kv_weight
+        # new_v = up_v_weight @ down_kv_weight
+        # old_v = layer.self_attn.v_proj.weight
 
         # 4. Delete original k_proj and v_proj
         delattr(layer.self_attn, "k_proj")
