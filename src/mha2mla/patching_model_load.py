@@ -16,7 +16,6 @@ def reorder_matrix_rows(mask, is_cat=False):
     Returns:
         The reordered weight matrix
     """
-    # mask = torch.tensor(mask, dtype=torch.bool)
     ones_indices = torch.where(mask)[0]
     zeros_indices = torch.where(~mask)[0]
     if is_cat:
@@ -52,7 +51,7 @@ def patch_model(model, model_args, mha2mla_args):
         q_indices = reorder_matrix_rows(q_mask, is_cat=True)
         layer.self_attn.q_proj.weight.data.copy_(q_weight[q_indices])
         if q_bias is not None:
-            layer.self_attn.q_rerank_proj.bias.data.copy_(q_bias[q_indices])
+            layer.self_attn.q_proj.bias.data.copy_(q_bias[q_indices])
 
         # 2. Reorder k_proj and setup k_r_proj
         # Get original weights and biases if biases exist

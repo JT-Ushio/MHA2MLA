@@ -11,6 +11,7 @@ from transformers import (
     DataCollatorForLanguageModeling,
     Trainer,
 )
+from transformers.utils import logging
 from arguments import (
     MHA2MLAModelArguments,
     MHA2MLADataArguments,
@@ -20,6 +21,8 @@ from helpers import load_dataset, load_optimizer_scheduler
 from patching_model_load import patch_model
 from patching_qwen2 import mha2mla_qwen2
 from patching_llama import mha2mla_llama
+
+logger = logging.get_logger(__name__)
 
 
 def main():
@@ -39,35 +42,40 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     resume_from_checkpoint = train_args.resume_from_checkpoint
-    if resume_from_checkpoint is None:
+    logger.info(f"Model Args: {model_args}")
+    logger.info(f"MHA2MLA Args: {mha2mla_args}")
+    if mha2mla_args.is_baseline:
         mha_model = AutoModelForCausalLM.from_pretrained(name)
-        mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-    else:
-        mha_model = AutoModelForCausalLM.from_config(model_args)
-        mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-        mla_state_dict = AutoModelForCausalLM.from_pretrained(
-            resume_from_checkpoint
-        ).state_dict()
-        mla_model.load_state_dict(mla_state_dict)
+        model = mha_model
+    else:  # need mha2mla
+        if resume_from_checkpoint is None:
+            mha_model = AutoModelForCausalLM.from_pretrained(name)
+            mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+        else:
+            mha_model = AutoModelForCausalLM.from_config(model_args)
+            mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+            mla_state_dict = AutoModelForCausalLM.from_pretrained(
+                resume_from_checkpoint
+            ).state_dict()
+            mla_model.load_state_dict(mla_state_dict)
 
-    # print args and patch mha2mla
-    print(model_args, mha2mla_args, mha_model)
-    if isinstance(mha_model, LlamaForCausalLM):
-        mha2mla_llama(q_idx, k_idx)
-    elif isinstance(mha_model, Qwen2ForCausalLM):
-        mha2mla_qwen2(q_idx, k_idx)
-    print(mla_model)
+        if isinstance(mha_model, LlamaForCausalLM):
+            mha2mla_llama(q_idx, k_idx)
+        elif isinstance(mha_model, Qwen2ForCausalLM):
+            mha2mla_qwen2(q_idx, k_idx)
+        model = mla_model
+    logger.info(f"Model: {model}")
 
     if train_args.bf16:
-        mla_model = mla_model.to(dtype=torch.bfloat16)
+        model = model.to(dtype=torch.bfloat16)
     elif train_args.fp16:
-        mla_model = mla_model.to(dtype=torch.float16)
+        model = model.to(dtype=torch.float16)
 
     train_dataset = load_dataset(data_args, train_args, tokenizer)
-    optimizer, lr_scheduler = load_optimizer_scheduler(mla_model, train_args)
+    optimizer, lr_scheduler = load_optimizer_scheduler(model, train_args)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     trainer = Trainer(
-        model=mla_model,
+        model=model,
         tokenizer=tokenizer,
         args=train_args,
         train_dataset=train_dataset,

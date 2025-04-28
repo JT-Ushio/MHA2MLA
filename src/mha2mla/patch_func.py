@@ -1,7 +1,5 @@
-import sys
 import torch
 import torch.nn as nn
-import numpy as np
 
 
 def partial_rope_mask(model_args, mha2mla_args):
