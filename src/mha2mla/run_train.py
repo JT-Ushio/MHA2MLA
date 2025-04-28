@@ -1,4 +1,3 @@
-import sys
 import argparse
 
 import torch
@@ -39,13 +38,16 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    resume_from_checkpoint = train_args.resume_from_checkpoint
     if resume_from_checkpoint is None:
         mha_model = AutoModelForCausalLM.from_pretrained(name)
         mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
     else:
         mha_model = AutoModelForCausalLM.from_config(model_args)
         mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-        mla_state_dict = AutoModelForCausalLM.from_pretrained(resume_from_checkpoint).state_dict()
+        mla_state_dict = AutoModelForCausalLM.from_pretrained(
+            resume_from_checkpoint
+        ).state_dict()
         mla_model.load_state_dict(mla_state_dict)
 
     # print args and patch mha2mla
@@ -62,7 +64,6 @@ def main():
         mla_model = mla_model.to(dtype=torch.float16)
 
     train_dataset = load_dataset(data_args, train_args, tokenizer)
-    resume_from_checkpoint = train_args.resume_from_checkpoint
     optimizer, lr_scheduler = load_optimizer_scheduler(mla_model, train_args)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     trainer = Trainer(

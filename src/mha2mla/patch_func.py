@@ -69,9 +69,9 @@ def partial_rope_mask(model_args, mha2mla_args):
         # method was not detailed in the comments. In practice, this would
         # require statistics from the weight matrices to determine importance.
         with open(mha2mla_args.qk_tensor_path, "rb") as fin:
-            qk_norm = torch.load(fin, weights_only=True)
+            qk_norm_rank = torch.load(fin, weights_only=True)
 
-        k_masks = qk_norm["ranks"] < rope_dim_for_mla_half
+        k_masks = qk_norm_rank < rope_dim_for_mla_half
         q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=1)
         k_masks = k_masks.view(k_masks.size(0), -1)
         q_masks = q_masks.view(q_masks.size(0), -1)
