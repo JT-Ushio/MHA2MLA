@@ -16,7 +16,7 @@ def reorder_matrix_rows(mask, is_cat=False):
     Returns:
         The reordered weight matrix
     """
-    mask = torch.tensor(mask, dtype=torch.bool)
+    # mask = torch.tensor(mask, dtype=torch.bool)
     ones_indices = torch.where(mask)[0]
     zeros_indices = torch.where(~mask)[0]
     if is_cat:
@@ -37,6 +37,7 @@ def patch_model(model, model_args, mha2mla_args):
         low_rank: The rank for the low-rank approximation of v_proj
     """
     q_masks, k_masks = partial_rope_mask(model_args, mha2mla_args)
+
     n_k_head, n_head = model_args.num_key_value_heads, model_args.num_attention_heads
     q_idx = []
     k_idx = []
@@ -77,12 +78,6 @@ def patch_model(model, model_args, mha2mla_args):
             method=mha2mla_args.svd_init_method,
         )
         layer.self_attn.kv_proj = kv_proj
-        # down_kv_weight = layer.self_attn.kv_proj.down_kv.weight
-        # up_k_weight = layer.self_attn.kv_proj.up_k.weight
-        # up_v_weight = layer.self_attn.kv_proj.up_v.weight
-        # new_k = up_k_weight @ down_kv_weight
-        # new_v = up_v_weight @ down_kv_weight
-        # old_v = layer.self_attn.v_proj.weight
 
         # 4. Delete original k_proj and v_proj
         delattr(layer.self_attn, "k_proj")

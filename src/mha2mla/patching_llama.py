@@ -105,8 +105,6 @@ def custom_LlamaSdpaAttention_forward(
     key_r_states = self.k_r_proj(hidden_states)
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
-    # print('query_states: ', query_states.size())
-    # sys.exit()
     key_r_states = key_r_states.view(
         bsz, q_len, self.num_key_value_heads, -1
     ).transpose(1, 2)

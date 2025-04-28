@@ -18,7 +18,7 @@ def partial_rope_mask(model_args, mha2mla_args):
     rope_dim_for_mla = mha2mla_args.rope_dim_for_mla
     rope_dim_for_mla_half = rope_dim_for_mla // 2
     rope_version = mha2mla_args.partial_rope_version
-    mask = np.zeros(d_head)
+    mask = torch.zeros(d_head)
 
     def select_high_frequency(mask):
         """
@@ -26,10 +26,10 @@ def partial_rope_mask(model_args, mha2mla_args):
         Returns:
             mask: Binary mask with 1s for the first rope_dim_for_mla dimensions
         """
-        mask[:rope_dim_for_mla_half] = 1.0
-        mask[d_head_half : d_head_half + rope_dim_for_mla_half] = 1.0
-        q_masks = np.tile(mask, n_head)
-        k_masks = np.tile(mask, n_k_head)
+        mask[:rope_dim_for_mla_half] = 1
+        mask[d_head_half : d_head_half + rope_dim_for_mla_half] = 1
+        q_masks = mask.repeat(n_head)
+        k_masks = mask.repeat(n_k_head)
         return q_masks, k_masks
 
     def select_low_frequency(mask):
@@ -38,10 +38,10 @@ def partial_rope_mask(model_args, mha2mla_args):
         Returns:
             mask: Binary mask with 1s for the last rope_dim_for_mla dimensions
         """
-        mask[d_head - rope_dim_for_mla_half :] = 1.0
-        mask[d_head_half - rope_dim_for_mla_half : d_head_half] = 1.0
-        q_masks = np.tile(mask, n_head)
-        k_masks = np.tile(mask, n_k_head)
+        mask[d_head - rope_dim_for_mla_half :] = 1
+        mask[d_head_half - rope_dim_for_mla_half : d_head_half] = 1
+        q_masks = mask.repeat(n_head)
+        k_masks = mask.repeat(n_k_head)
         return q_masks, k_masks
 
     def select_uniform_frequency(mask, start_point):
@@ -54,9 +54,9 @@ def partial_rope_mask(model_args, mha2mla_args):
         assert d_head_half % step == 0, "rope_dim_for_mla must be greater than 0"
 
         for i in range(start_point, d_head, step):
-            mask[i] = 1.0
-        q_masks = np.tile(mask, n_head)
-        k_masks = np.tile(mask, n_k_head)
+            mask[i] = 1
+        q_masks = mask.repeat(n_head)
+        k_masks = mask.repeat(n_k_head)
         return q_masks, k_masks
 
     def select_2norm_frequency(mask, rope_dim_for_mla):
@@ -69,12 +69,12 @@ def partial_rope_mask(model_args, mha2mla_args):
         # method was not detailed in the comments. In practice, this would
         # require statistics from the weight matrices to determine importance.
         with open(mha2mla_args.qk_tensor_path, "rb") as fin:
-            qk_norm = torch.load(fin)
+            qk_norm = torch.load(fin, weights_only=True)
 
         k_masks = qk_norm["ranks"] < rope_dim_for_mla_half
-        q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=-1)
-        k_masks = k_masks.reshape(k_masks.size(0), -1)
-        q_masks = q_masks.reshape(q_masks.size(0), -1)
+        q_masks = k_masks.repeat_interleave(n_head // n_k_head, dim=1)
+        k_masks = k_masks.view(k_masks.size(0), -1)
+        q_masks = q_masks.view(q_masks.size(0), -1)
         return q_masks, k_masks
 
     if rope_version == "high":

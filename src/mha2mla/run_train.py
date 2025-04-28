@@ -24,6 +24,7 @@ from patching_llama import mha2mla_llama
 
 
 def main():
+    # load arguments
     cfg_parser = argparse.ArgumentParser()
     cfg_parser.add_argument("--cfg_file", type=str, required=True)
     cfg = cfg_parser.parse_args()
@@ -31,19 +32,29 @@ def main():
         (MHA2MLATrainingArguments, MHA2MLAModelArguments, MHA2MLADataArguments)
     )
     train_args, mha2mla_args, data_args = hf_parser.parse_yaml_file(cfg.cfg_file)
+
+    # load tokenizer and model
     name = mha2mla_args.model_name_or_path
     model_args = AutoConfig.from_pretrained(name)
     tokenizer = AutoTokenizer.from_pretrained(name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    mha_model = AutoModelForCausalLM.from_pretrained(name)
-    mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+    if resume_from_checkpoint is None:
+        mha_model = AutoModelForCausalLM.from_pretrained(name)
+        mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+    else:
+        mha_model = AutoModelForCausalLM.from_config(model_args)
+        mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+        mla_state_dict = AutoModelForCausalLM.from_pretrained(resume_from_checkpoint).state_dict()
+        mla_model.load_state_dict(mla_state_dict)
+
+    # print args and patch mha2mla
+    print(model_args, mha2mla_args, mha_model)
     if isinstance(mha_model, LlamaForCausalLM):
         mha2mla_llama(q_idx, k_idx)
     elif isinstance(mha_model, Qwen2ForCausalLM):
         mha2mla_qwen2(q_idx, k_idx)
-    print(model_args, mha2mla_args)
-    print(mha_model, mla_model)
+    print(mla_model)
 
     if train_args.bf16:
         mla_model = mla_model.to(dtype=torch.bfloat16)

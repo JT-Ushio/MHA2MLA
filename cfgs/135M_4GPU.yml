@@ -2,7 +2,7 @@
 seed: 42
 max_steps: 18000
 report_to: wandb
-run_name: hf_test
+run_name: only_2_norm
 save_strategy: steps
 save_steps: 0.1
 output_dir: ../checkpoints/test
@@ -23,7 +23,7 @@ learning_rate: 1.0e-4
 adam_beta1: 0.9
 adam_beta2: 0.95
 adam_epsilon: 1.0e-8
-weight_decay: 0.01
+weight_decay: 0.0
 # lr scheduler
 use_constant_with_warmup_decay_scheduler: true
 lr_scheduler_kwargs:
@@ -42,18 +42,18 @@ partial_rope_version: "2-norm" # 'high'/'low'/'uniform'/'2-norm'
 rope_dim_for_mla: 8
 uniform_start_point: 0 # optional only for 'uniform'
 # num_query_heads_div_key_heads: 1
-qk_tensor_path: "/cpfs01/shared/llm_ddd/doushihan/taoji/code/MHA2MLA_V2_jf/utils/qk_tensor_135M_rank_q.pth"
+qk_tensor_path: "/cpfs01/shared/llm_ddd/jitao/code/MHA2MLA_V2_jf/utils/qk_tensor_135M_rank_k.pth"
 svd_init_method: "joint" # 'split'/'joint'
 low_rank: 8
 
 # DataArguments
 is_nanoset: true
 dataset_folders:
-  - /cpfs01/shared/llm_ddd/doushihan/taoji/data/smollm1_corpus/fineweb-edu-dedup/
-  - /cpfs01/shared/llm_ddd/doushihan/taoji/data/smollm1_corpus/cosmopedia-v2/
-  - /cpfs01/shared/llm_ddd/doushihan/taoji/data/smollm1_corpus/python-edu/
-  - /cpfs01/shared/llm_ddd/doushihan/taoji/data/smollm1_corpus/open-web-math/
-  - /cpfs01/shared/llm_ddd/doushihan/taoji/data/smollm1_corpus/stackoverflow/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/fineweb-edu-dedup/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/cosmopedia-v2/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/python-edu/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/open-web-math/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/stackoverflow/
 dataset_weights: # 各数据集的权重
   - 0.7
   - 0.15
