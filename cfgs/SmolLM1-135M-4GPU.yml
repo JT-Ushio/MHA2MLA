@@ -1,18 +1,18 @@
 # TrainingArguments
 seed: 42
-max_steps: 18000
+max_steps: 12000
 report_to: wandb
-run_name: only_2_norm
+run_name: smollm1-135m-d_kv_8
 save_strategy: steps
 save_steps: 0.1
-output_dir: ../checkpoints/test
+output_dir: ckpts/smollm1-135m-d_kv_8
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
 resume_from_checkpoint: null
 per_device_train_batch_size: 16
 remove_unused_columns: False
-gradient_accumulation_steps: 2
+gradient_accumulation_steps: 4
 bf16: true
 deepspeed: cfgs/ds_zero_2.json
 dataloader_drop_last: true
@@ -28,23 +28,24 @@ weight_decay: 0.0
 use_constant_with_warmup_decay_scheduler: true
 lr_scheduler_kwargs:
   {
-    "lr_decay_starting_step": 16200,
-    "lr_decay_steps": 1800,
+    "lr_decay_starting_step": 10000,
+    "lr_decay_steps": 2000,
     "lr_decay_style": "1-sqrt",
-    "lr_warmup_steps": 900,
+    "lr_warmup_steps": 1200,
     "lr_warmup_style": "linear",
     "min_decay_lr": 0,
   }
 
 # ModelArguments
 model_name_or_path: HuggingFaceTB/SmolLM-135M
-partial_rope_version: "2-norm" # 'high'/'low'/'uniform'/'2-norm'
+partial_rope_version: 2-norm # 'high'/'low'/'uniform'/'2-norm'
 rope_dim_for_mla: 8
 uniform_start_point: 0 # optional only for 'uniform'
 # num_query_heads_div_key_heads: 1
-qk_tensor_path: "/cpfs01/shared/llm_ddd/jitao/code/MHA2MLA_V2_jf/utils/qk_tensor_135M_rank_k.pth"
-svd_init_method: "joint" # 'split'/'joint'
+qk_tensor_path: utils/smollm1_135M-2_norm_rank.pth
+svd_init_method: joint # 'split'/'joint'
 low_rank: 8
+is_baseline: false
 
 # DataArguments
 is_nanoset: true
