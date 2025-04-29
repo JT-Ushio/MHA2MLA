@@ -58,7 +58,7 @@ class MHA2MLAModelArguments:
             )
 
         # Validate svd_init_method
-        valid_svd_methods = ["none", "split", "joint"]
+        valid_svd_methods = ["none", "split", "joint", "only_key", "only_value"]
         if self.svd_init_method not in valid_svd_methods:
             raise ValueError(
                 f"svd_init_method must be one of {valid_svd_methods}, got '{self.svd_init_method}'"
