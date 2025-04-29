@@ -2,10 +2,10 @@
 seed: 42
 max_steps: 12000
 report_to: wandb
-run_name: qwen1_5-0_5B-d_kv_32
+run_name: qwen1_5-0_5B-d_kv_8
 save_strategy: steps
 save_steps: 0.1
-output_dir: ckpts/qwen1_5-0_5B-d_kv_32
+output_dir: ckpts/qwen1_5-0_5B-d_kv_8
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
@@ -43,7 +43,7 @@ rope_dim_for_mla: 8
 uniform_start_point: 0 # optional only for 'uniform'
 qk_tensor_path: utils/qwen1.5_0.5B-2_norm_rank.pth # null / utils/qwen1.5_0.5B-2_norm_rank.pth
 svd_init_method: joint # 'split' / 'joint' / 'only_key' / 'only_value' / 'none'
-low_rank: 32
+low_rank: 8
 is_baseline: false
 
 # DataArguments

@@ -153,12 +153,11 @@ class LowRankKVLinear2(nn.Module):
 
     def __init__(
         self,
+        d_in,
+        d_k_out,
+        d_v_out,
         d_mid=0,
-        d_k_in=0,
-        d_k_out=0,
         k_approx=False,
-        d_v_in=0,
-        d_v_out=0,
         v_approx=False,
         kv_joint=False,
         bias=None,
@@ -166,24 +165,26 @@ class LowRankKVLinear2(nn.Module):
         super().__init__()
         # TODO: add activations after down_kv
         if kv_joint:
-            self.down_kv = nn.Linear(in_features=d_k_in + d_v_in, out_features=d_mid, bias=False)
+            self.down_kv = nn.Linear(in_features=d_in, out_features=d_mid, bias=False)
         if not kv_joint and k_approx:
-            self.down_k = nn.Linear(in_features=d_k_in, out_features=d_mid, bias=False)
+            self.down_k = nn.Linear(in_features=d_in, out_features=d_mid, bias=False)
         if not kv_joint and v_approx:
-            self.down_v = nn.Linear(in_features=d_v_in, out_features=d_mid, bias=False)
+            self.down_v = nn.Linear(in_features=d_in, out_features=d_mid, bias=False)
 
         if k_approx:
             self.up_k = nn.Linear(in_features=d_mid, out_features=d_k_out, bias=bias)
         else:
-            self.up_k = nn.Linear(in_features=d_k_in, out_features=d_k_out, bias=bias)
+            self.up_k = nn.Linear(in_features=d_in, out_features=d_k_out, bias=bias)
         if v_approx:
             self.up_v = nn.Linear(in_features=d_mid, out_features=d_v_out, bias=bias)
         else:
-            self.up_v = nn.Linear(in_features=d_v_in, out_features=d_v_out, bias=bias)
+            self.up_v = nn.Linear(in_features=d_in, out_features=d_v_out, bias=bias)
 
     def reset_parameters(
         self,
         down_kv_weight=None,
+        down_k_weight=None,
+        down_v_weight=None,
         up_k_weight=None,
         up_v_weight=None,
         up_k_bias=None,
@@ -191,6 +192,10 @@ class LowRankKVLinear2(nn.Module):
     ):
         if down_kv_weight is not None:
             self.down_kv.weight.data.copy_(down_kv_weight)
+        if down_k_weight is not None:
+            self.down_k.weight.data.copy_(down_k_weight)
+        if down_v_weight is not None:
+            self.down_v.weight.data.copy_(down_v_weight)
         if up_k_weight is not None:
             self.up_k.weight.data.copy_(up_k_weight)
         if up_v_weight is not None:
@@ -202,16 +207,13 @@ class LowRankKVLinear2(nn.Module):
 
     def mha_forward(self, x):
         # x: (batch_size, seq_len, in_features)
-        kv = self.down_kv(x)
-        d_kv, d_k, d_v = self.d_kv_mid, self.d_k_mid, self.d_v_mid
-        if hasattr(self, "up_k"):
-            k = self.up_k(kv) if d_kv == d_k else self.up_k(kv[:d_k])
+        if hasattr(self, "down_kv"):
+            k = v = self.down_kv(x)
         else:
-            k = kv[..., : self.d_k_out]
-        if hasattr(self, "up_v"):
-            v = self.up_v(kv) if d_kv == d_v else self.up_v(kv[-d_v:])
-        else:
-            v = kv[..., -self.d_v_out :]
+            k = self.down_k(x) if hasattr(self, "down_k") else x
+            v = self.down_v(x) if hasattr(self, "down_v") else x
+        k = self.up_k(k)
+        v = self.up_v(v)
         return k, v
 
     def mla_forward(self, x, q_hid, o_hid):
@@ -229,38 +231,70 @@ def SVD(X, r):
 
 def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method):
     d_k_c, d_v, d_kv_in = k_c_weight.size(0), v_weight.size(0), v_weight.size(1)
+    has_bias = k_c_bias is not None
+
     if method == "only_key":
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
-        up_v = None
-        down_kv = torch.cat([down_k, v_weight], dim=0)
-        d_k_mid = d_kv_mid
-        d_kv_mid += d_v
-        d_v_mid = d_v = 0
+        kv_proj = LowRankKVLinear2(
+            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, k_approx=True, bias=has_bias
+        )
+        kv_proj.reset_parameters(
+            down_k_weight=down_k,
+            up_k_weight=up_k,
+            up_v_weight=v_weight,
+            up_k_bias=k_c_bias,
+            up_v_bias=v_bias,
+        )
     elif method == "only_value":
         down_v, up_v = SVD(v_weight, d_kv_mid)
-        up_k = None
-        down_kv = torch.cat([k_c_weight, down_v])
-        d_v_mid = d_kv_mid
-        d_kv_mid += d_k_c
-        d_k_mid = d_k_c = 0
+        kv_proj = LowRankKVLinear2(
+            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, v_approx=True, bias=has_bias
+        )
+        kv_proj.reset_parameters(
+            down_v_weight=down_v,
+            up_k_weight=k_c_weight,
+            up_v_weight=up_v,
+            up_k_bias=k_c_bias,
+            up_v_bias=v_bias,
+        )
     elif method == "split":
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
         down_v, up_v = SVD(v_weight, d_kv_mid)
-        down_kv = torch.cat([down_k, down_v])
-        d_k_mid = d_v_mid = d_kv_mid
-        d_kv_mid *= 2
+        kv_proj = LowRankKVLinear2(
+            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, k_approx=True, v_approx=True, bias=has_bias
+        )
+        kv_proj.reset_parameters(
+            down_k_weight=down_k,
+            down_v_weight=down_v,
+            up_k_weight=up_k,
+            up_v_weight=up_v,
+            up_k_bias=k_c_bias,
+            up_v_bias=v_bias,
+        )
     elif method == "joint":
         joint_kv = torch.cat([k_c_weight, v_weight])
         down_kv, up_kv = SVD(joint_kv, d_kv_mid)
         up_k, up_v = up_kv.split([d_k_c, d_v])
-        d_k_mid = d_v_mid = d_kv_mid
+        kv_proj = LowRankKVLinear2(
+            d_kv_in,
+            d_k_c,
+            d_v,
+            d_mid=d_kv_mid,
+            k_approx=True,
+            v_approx=True,
+            kv_joint=True,
+            bias=has_bias,
+        )
+        kv_proj.reset_parameters(
+            down_kv_weight=down_kv,
+            up_k_weight=up_k,
+            up_v_weight=up_v,
+            up_k_bias=k_c_bias,
+            up_v_bias=v_bias,
+        )
     elif method == "none":
-        down_kv = torch.cat([k_c_weight, v_weight])
-        up_k = up_v = None
-        d_kv_mid = d_k_c + d_v
-        d_k_mid = d_v_mid = 0
-
-    has_bias = k_c_bias is not None
-    kv_proj = LowRankKVLinear(d_kv_in, d_kv_mid, d_k_mid, d_k_c, d_v_mid, d_v, has_bias)
-    kv_proj.reset_parameters(down_kv, up_k, up_v, k_c_bias, v_bias)
+        kv_proj = LowRankKVLinear2(d_kv_in, d_k_c, d_v, bias=has_bias)
+        kv_proj.reset_parameters(
+            up_k_weight=k_c_weight, up_v_weight=v_weight, up_k_bias=k_c_bias, up_v_bias=v_bias
+        )
     return kv_proj
