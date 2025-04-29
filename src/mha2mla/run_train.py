@@ -54,10 +54,10 @@ def main():
         else:
             mha_model = AutoModelForCausalLM.from_config(model_args)
             mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-            mla_state_dict = AutoModelForCausalLM.from_pretrained(
-                resume_from_checkpoint
-            ).state_dict()
-            mla_model.load_state_dict(mla_state_dict)
+            # mla_state_dict = AutoModelForCausalLM.from_pretrained(
+            #     resume_from_checkpoint
+            # ).state_dict()
+            # mla_model.load_state_dict(mla_state_dict, False)
 
         if isinstance(mha_model, LlamaForCausalLM):
             mha2mla_llama(q_idx, k_idx)
