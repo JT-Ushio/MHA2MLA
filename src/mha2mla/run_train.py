@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import asdict
 
 import torch
 from transformers import (
@@ -44,26 +45,18 @@ def main():
     resume_from_checkpoint = train_args.resume_from_checkpoint
     logger.info(f"Model Args: {model_args}")
     logger.info(f"MHA2MLA Args: {mha2mla_args}")
-    if mha2mla_args.is_baseline:
+    model_args.mha2mla = asdict(mha2mla_args)
+    if mha2mla_args.is_baseline or resume_from_checkpoint is None:
         mha_model = AutoModelForCausalLM.from_pretrained(name)
-        model = mha_model
-    else:  # need mha2mla
-        if resume_from_checkpoint is None:
-            mha_model = AutoModelForCausalLM.from_pretrained(name)
-            mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-        else:
-            mha_model = AutoModelForCausalLM.from_config(model_args)
-            mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
-            # mla_state_dict = AutoModelForCausalLM.from_pretrained(
-            #     resume_from_checkpoint
-            # ).state_dict()
-            # mla_model.load_state_dict(mla_state_dict, False)
-
+    else:
+        mha_model = AutoModelForCausalLM.from_config(model_args)
+    if not mha2mla_args.is_baseline:
+        mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
         if isinstance(mha_model, LlamaForCausalLM):
             mha2mla_llama(q_idx, k_idx)
         elif isinstance(mha_model, Qwen2ForCausalLM):
             mha2mla_qwen2(q_idx, k_idx)
-        model = mla_model
+    model = mha_model if mha2mla_args.is_baseline else mla_model
     logger.info(f"Model: {model}")
 
     if train_args.bf16:
@@ -74,6 +67,8 @@ def main():
     train_dataset = load_dataset(data_args, train_args, tokenizer)
     optimizer, lr_scheduler = load_optimizer_scheduler(model, train_args)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+
+    # training
     trainer = Trainer(
         model=model,
         tokenizer=tokenizer,
@@ -82,11 +77,7 @@ def main():
         optimizers=(optimizer, lr_scheduler),
         data_collator=data_collator,
     )
-    # train
-    if resume_from_checkpoint is not None:
-        trainer.train(resume_from_checkpoint)
-    else:
-        trainer.train()
+    trainer.train(resume_from_checkpoint)
 
 
 if __name__ == "__main__":

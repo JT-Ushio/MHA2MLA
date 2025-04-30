@@ -2,15 +2,15 @@
 seed: 42
 max_steps: 12000
 report_to: wandb
-run_name: qwen1_5-0_5B-baseline
+run_name: smollm1-135m-baseline
 save_strategy: steps
 save_steps: 0.1
-output_dir: ckpts/qwen1_5-0_5B-baseline
+output_dir: ckpts/smollm1-135m-baseline
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
 resume_from_checkpoint: null
-per_device_train_batch_size: 8
+per_device_train_batch_size: 16
 remove_unused_columns: False
 gradient_accumulation_steps: 8
 bf16: true
@@ -37,23 +37,24 @@ lr_scheduler_kwargs:
   }
 
 # ModelArguments
-model_name_or_path: Qwen/Qwen1.5-0.5B
+model_name_or_path: HuggingFaceTB/SmolLM-135M
 partial_rope_version: 2-norm # 'high'/'low'/'uniform'/'2-norm'
 rope_dim_for_mla: 8
 uniform_start_point: 0 # optional only for 'uniform'
-qk_tensor_path: utils/qwen1.5_0.5B-2_norm_rank.pth # null / utils/qwen1.5_0.5B-2_norm_rank.pth
-svd_init_method: joint # 'split' / 'joint' / 'only_key' / 'only_value' / 'none'
+# num_query_heads_div_key_heads: 1
+qk_tensor_path: utils/smollm1_135M-2_norm_rank.pth
+svd_init_method: joint # 'split'/'joint'
 low_rank: 0
 is_baseline: true
 
 # DataArguments
 is_nanoset: true
 dataset_folders:
-  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/fineweb-edu-dedup/
-  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/cosmopedia-v2/
-  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/python-edu/
-  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/open-web-math/
-  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/stackoverflow/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/fineweb-edu-dedup/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/cosmopedia-v2/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/python-edu/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/open-web-math/
+  - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/stackoverflow/
 dataset_weights: # 各数据集的权重
   - 0.7
   - 0.15

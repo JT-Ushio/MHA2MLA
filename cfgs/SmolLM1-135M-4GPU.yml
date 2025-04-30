@@ -2,10 +2,10 @@
 seed: 42
 max_steps: 12000
 report_to: wandb
-run_name: smollm1-135m-d_kv_8
+run_name: smollm1-135m-d_kv_32
 save_strategy: steps
 save_steps: 0.1
-output_dir: ckpts/smollm1-135m-d_kv_8
+output_dir: ckpts/smollm1-135m-d_kv_32
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
@@ -44,7 +44,7 @@ uniform_start_point: 0 # optional only for 'uniform'
 # num_query_heads_div_key_heads: 1
 qk_tensor_path: utils/smollm1_135M-2_norm_rank.pth
 svd_init_method: joint # 'split'/'joint'
-low_rank: 8
+low_rank: 32
 is_baseline: false
 
 # DataArguments
