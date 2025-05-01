@@ -2,10 +2,10 @@
 seed: 42
 max_steps: 12000
 report_to: wandb
-run_name: smollm1-1B7-d_kv_16
+run_name: smollm1-1B7-baseline
 save_strategy: steps
 save_steps: 0.1
-output_dir: ckpts/smollm1-1B7-d_kv_16
+output_dir: ckpts/smollm1-1B7-baseline
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
@@ -44,8 +44,8 @@ uniform_start_point: 0 # optional only for 'uniform'
 # num_query_heads_div_key_heads: 1
 qk_tensor_path: utils/smollm1_1B7-2_norm_rank.pth
 svd_init_method: joint # 'split'/'joint'
-low_rank: 16
-is_baseline: false
+low_rank: 0
+is_baseline: true
 
 # DataArguments
 is_nanoset: true
