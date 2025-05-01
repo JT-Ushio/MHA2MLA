@@ -56,6 +56,12 @@ def patch_model(model, model_args, mha2mla_args):
         # 2. Reorder k_proj and setup k_r_proj
         # Get original weights and biases if biases exist
         k_weight = layer.self_attn.k_proj.weight
+        if mha2mla_args.is_gqa2mha2mla:
+            k_weight = (
+                k_weight.view(n_k_head, -1, k_weight.size(-1))
+                .repeat_interleave(n_head // n_k_head, dim=0)
+                .view(-1, k_weight.size(-1))
+            )
         k_bias = getattr(layer.self_attn.k_proj, "bias", None)
 
         # Reorder and update weights and biases if biases exist

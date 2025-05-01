@@ -44,6 +44,10 @@ class MHA2MLAModelArguments:
         default=False,
         metadata={"help": "if the finetuning is the baseline"},
     )
+    is_gqa2mha2mla: bool = field(
+        default=False,
+        metadata={"help": "if the finetuning is GQA2MHA2MLA"},
+    )
 
     def __post_init__(self):
         # Call parent class __post_init__ first to ensure any parent validation happens

@@ -2,15 +2,15 @@
 seed: 42
 max_steps: 12000
 report_to: wandb
-run_name: smollm1-360m-d_kv
+run_name: smollm1-1B7-d_kv_16
 save_strategy: steps
 save_steps: 0.1
-output_dir: ckpts/smollm1-360m-baseline
+output_dir: ckpts/smollm1-1B7-d_kv_16
 overwrite_output_dir: true
 logging_strategy: steps
 logging_steps: 1
 resume_from_checkpoint: null
-per_device_train_batch_size: 16
+per_device_train_batch_size: 8
 remove_unused_columns: False
 gradient_accumulation_steps: 8
 bf16: true
@@ -37,15 +37,15 @@ lr_scheduler_kwargs:
   }
 
 # ModelArguments
-model_name_or_path: HuggingFaceTB/SmolLM-360M
+model_name_or_path: HuggingFaceTB/SmolLM-1.7B
 partial_rope_version: 2-norm # 'high'/'low'/'uniform'/'2-norm'
 rope_dim_for_mla: 8
 uniform_start_point: 0 # optional only for 'uniform'
 # num_query_heads_div_key_heads: 1
-qk_tensor_path: utils/smollm1_360M-2_norm_rank.pth
+qk_tensor_path: utils/smollm1_1B7-2_norm_rank.pth
 svd_init_method: joint # 'split'/'joint'
-low_rank: 0
-is_baseline: true
+low_rank: 16
+is_baseline: false
 
 # DataArguments
 is_nanoset: true

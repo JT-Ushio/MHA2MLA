@@ -11,6 +11,8 @@ from transformers.models.llama.modeling_llama import (
     LlamaSdpaAttention,
 )
 
+from mla_triton_kernel import decode_attention_fwd
+
 logger = logging.get_logger(__name__)
 
 
@@ -104,12 +106,10 @@ def custom_LlamaSdpaAttention_forward(
     key_r_states = self.k_r_proj(hidden_states)
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
-    key_r_states = key_r_states.view(
-        bsz, q_len, self.num_key_value_heads, -1
-    ).transpose(1, 2)
-    key_c_states = key_c_states.view(
-        bsz, q_len, self.num_key_value_heads, -1
-    ).transpose(1, 2)
+    is_gqa2mha2mla = key_c_states.size(-1) + key_r_states.size(-1) != value_states.size(-1)
+    n_k_head = self.num_heads if is_gqa2mha2mla else self.num_key_value_heads
+    key_r_states = key_r_states.view(bsz, q_len, n_k_head, -1).transpose(1, 2)
+    key_c_states = key_c_states.view(bsz, q_len, n_k_head, -1).transpose(1, 2)
     query_r_states = query_states[..., :self.num_heads*key_r_states.size(-1)]
     query_c_states = query_states[..., self.num_heads*key_r_states.size(-1):]
     query_r_states = query_r_states.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
@@ -141,8 +141,8 @@ def custom_LlamaSdpaAttention_forward(
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs
         )
-
-    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    if not is_gqa2mha2mla:
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
     value_states = repeat_kv(value_states, self.num_key_value_groups)
 
     causal_mask = attention_mask
