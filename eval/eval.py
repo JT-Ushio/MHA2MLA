@@ -104,10 +104,10 @@ def cli_evaluate():  # noqa: C901
     model_config = AutoConfig.from_pretrained(ckpt_path)
 
     if (
-        hasattr(model_config, "mha2mla_args")
-        and not model_config.mha2mla_args["is_baseline"]
+        hasattr(model_config, "mha2mla")
+        and not model_config.mha2mla["is_baseline"]
     ):
-        mha2mla_args = types.SimpleNamespace(**model_config.mha2mla_args)
+        mha2mla_args = types.SimpleNamespace(**model_config.mha2mla)
         BaseModel._create_auto_model = create_load_func(mha2mla_args)
 
     if args.subcommand == "accelerate":

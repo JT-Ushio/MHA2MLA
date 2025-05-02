@@ -45,7 +45,6 @@ def main():
     resume_from_checkpoint = train_args.resume_from_checkpoint
     logger.info(f"Model Args: {model_args}")
     logger.info(f"MHA2MLA Args: {mha2mla_args}")
-    model_args.mha2mla = asdict(mha2mla_args)
     if mha2mla_args.is_baseline or resume_from_checkpoint is None:
         mha_model = AutoModelForCausalLM.from_pretrained(name)
     else:
@@ -57,6 +56,7 @@ def main():
         elif isinstance(mha_model, Qwen2ForCausalLM):
             mha2mla_qwen2(q_idx, k_idx)
     model = mha_model if mha2mla_args.is_baseline else mla_model
+    model.config.mha2mla = asdict(mha2mla_args)
     logger.info(f"Model: {model}")
 
     if train_args.bf16:
