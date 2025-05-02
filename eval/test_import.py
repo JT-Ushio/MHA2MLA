@@ -1,1 +1,1 @@
-from src.mha2mla.patch_func import partial_rope_mask
+from src.mha2mla.run_train import main

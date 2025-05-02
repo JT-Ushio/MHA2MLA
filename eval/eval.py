@@ -1,55 +1,137 @@
 import argparse
-import os
-from dataclasses import asdict
-from pprint import pformat
+import os, sys
 
-from lighteval.parsers import parser_accelerate, parser_baseline, parser_nanotron, parser_utils_tasks
-from lighteval.tasks.registry import Registry, taskinfo_selector
-import yaml,json
+from transformers.modeling_utils import load_sharded_checkpoint
+
+from lighteval.models.utils import _get_dtype, _simplify_name, batched
+from lighteval.pipeline import (
+    EnvConfig,
+)
+import transformers
+from lighteval.parsers import (
+    parser_accelerate,
+)
+from lighteval.models.model_config import BaseModelConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoConfig,
+    LlamaForCausalLM,
+    Qwen2ForCausalLM,
+)
+import types
+from lighteval.models.model_loader import BaseModel
+
+current_file_path = os.path.abspath(__file__)
+target_directory = os.path.join(
+    os.path.dirname(os.path.dirname(current_file_path)), "src", "mha2mla"
+)
+sys.path.append(str(target_directory))
+from patching_model_load import patch_model
+from patching_qwen2 import mha2mla_qwen2
+from patching_llama import mha2mla_llama
+
+from safetensors.torch import load_file
 
 
-CACHE_DIR = os.getenv("HF_HOME")
+def create_load_func(mha2mla_args):
+
+    def _create_auto_model(
+        self, config: BaseModelConfig, env_config: EnvConfig
+    ) -> transformers.PreTrainedModel:
+        """
+        Creates an instance of the pretrained HF model.
+
+        Args:
+            pretrained (str): The name or path of the pretrained model.
+            revision (str): The revision of the model.
+            subfolder (Optional[str], optional): The subfolder within the model. Defaults to None.
+            max_memory (Optional[dict], optional): The maximum memory to allocate for the model per GPU. Defaults to None.
+            device_map (Optional[dict], optional): The device mapping for the model. Defaults to None.
+            torch_dtype (Optional[Union[str, torch.dtype]], optional): The torch data type for the model. Defaults to None.
+            quantization_config (Optional[Union[BitsAndBytesConfig, GPTQConfig]], optional): The quantization configuration for the model. Defaults to None.
+            trust_remote_code (bool, optional): Whether to trust remote code. Defaults to False.
+            cache_dir (str, optional): The cache directory for the model. Defaults to "/scratch".
+
+        Returns:
+            transformers.PreTrainedModel: The created auto model instance.
+        """
+        config.model_parallel, max_memory, device_map = self.init_model_parallel(
+            config.model_parallel
+        )
+        torch_dtype = _get_dtype(config.dtype, self._config)
+        ckpt_path = config.pretrained
+        if mha2mla_args is None or mha2mla_args.is_baseline:
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                revision=config.revision + (f"/{config.subfolder}" if config.subfolder is not None else ""),
+                max_memory=max_memory,
+                device_map=device_map,
+                torch_dtype=torch_dtype,
+                trust_remote_code=config.trust_remote_code,
+                cache_dir=env_config.cache_dir,
+                offload_folder=env_config.cache_dir,
+                token=env_config.token,
+                quantization_config=config.quantization_config,
+            )
+        else:
+            # Instance
+            model_config = AutoConfig.from_pretrained(ckpt_path)
+            mha_model = AutoModelForCausalLM.from_config(
+                model_config,
+                trust_remote_code=config.trust_remote_code,
+            )
+            mla_model, q_idx, k_idx = patch_model(mha_model, model_config, mha2mla_args)
+            if isinstance(mha_model, LlamaForCausalLM):
+                mha2mla_llama(q_idx, k_idx)
+            elif isinstance(mha_model, Qwen2ForCausalLM):
+                mha2mla_qwen2(q_idx, k_idx)
+            # Load weights
+            signle_weight_file = os.path.join(ckpt_path, "model.safetensors")
+            if os.path.exists(signle_weight_file):
+                state_dict = load_file(signle_weight_file)
+                mla_model.load_state_dict(state_dict)
+            else:
+                load_result = load_sharded_checkpoint(mla_model, ckpt_path)
+            model = mla_model.to(dtype=torch_dtype)
+        return model
+    return _create_auto_model
 
 
 # copied from lighteval.main
 def cli_evaluate():  # noqa: C901
-    parser = argparse.ArgumentParser(description="CLI tool for lighteval, a lightweight framework for LLM evaluation")
-    parser.add_argument(
-        "--is_partial_rope",
-        action="store_true",
-        help="Path to the RoPE configuration file. This file should contain the partial-RoPE configuration.",
-    )
-    parser.add_argument(
-        "--is_mla",
-        action="store_true",
-        help="Whether the model is a MLA model. If True, the model will be evaluated using the MLA architecture.",
+    parser = argparse.ArgumentParser(
+        description="CLI tool for lighteval, a lightweight framework for LLM evaluation"
     )
 
     subparsers = parser.add_subparsers(help="help for subcommand", dest="subcommand")
 
     # Subparser for the "accelerate" command
-    parser_a = subparsers.add_parser("accelerate", help="use accelerate and transformers as backend for evaluation.")
+    parser_a = subparsers.add_parser(
+        "accelerate", help="use accelerate and transformers as backend for evaluation."
+    )
     parser_accelerate(parser_a)
 
     args = parser.parse_args()
-    if args.is_mla or args.is_partial_rope:
-        from monkey_patch import partial_rope_monkey_patch, mla_monkey_patch
-        model_args = args.model_args
-        model_args = {k.split("=")[0]: k.split("=")[1] if "=" in k else True for k in model_args.split(",")}
-        ckpt_path = model_args["pretrained"]
-        with open(os.path.join(ckpt_path,"config.json")) as f:
-            model_config = json.load(f)
-        cfg_RoPE = model_config["RoPE"]
-        assert not (args.is_mla and args.is_partial_rope), "Cannot set both is_mla and is_partial_rope to True."
-        if args.is_mla:
-            mla_monkey_patch(cfg_RoPE)
-        else:
-            partial_rope_monkey_patch(cfg_RoPE)
+    model_args = args.model_args
+    model_args = {
+        k.split("=")[0]: k.split("=")[1] if "=" in k else True
+        for k in model_args.split(",")
+    }
+    ckpt_path = model_args["pretrained"]
+    model_config = AutoConfig.from_pretrained(ckpt_path)
+
+    if (
+        hasattr(model_config, "mha2mla_args")
+        and not model_config.mha2mla_args["is_baseline"]
+    ):
+        mha2mla_args = types.SimpleNamespace(**model_config.mha2mla_args)
+        BaseModel._create_auto_model = create_load_func(mha2mla_args)
 
     if args.subcommand == "accelerate":
-        from lighteval.main_accelerate import main as main_accelerate
+        from lighteval.main_accelerate import main as original_main_accelerate
 
-        main_accelerate(args)
+        # main_accelerate(args, model, ckpt_path)
+        original_main_accelerate(args)
     else:
         print("You need to set the subcommand to 'accelerate'.")
 
