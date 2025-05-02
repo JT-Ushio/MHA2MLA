@@ -38,23 +38,6 @@ def create_load_func(mha2mla_args):
     def _create_auto_model(
         self, config: BaseModelConfig, env_config: EnvConfig
     ) -> transformers.PreTrainedModel:
-        """
-        Creates an instance of the pretrained HF model.
-
-        Args:
-            pretrained (str): The name or path of the pretrained model.
-            revision (str): The revision of the model.
-            subfolder (Optional[str], optional): The subfolder within the model. Defaults to None.
-            max_memory (Optional[dict], optional): The maximum memory to allocate for the model per GPU. Defaults to None.
-            device_map (Optional[dict], optional): The device mapping for the model. Defaults to None.
-            torch_dtype (Optional[Union[str, torch.dtype]], optional): The torch data type for the model. Defaults to None.
-            quantization_config (Optional[Union[BitsAndBytesConfig, GPTQConfig]], optional): The quantization configuration for the model. Defaults to None.
-            trust_remote_code (bool, optional): Whether to trust remote code. Defaults to False.
-            cache_dir (str, optional): The cache directory for the model. Defaults to "/scratch".
-
-        Returns:
-            transformers.PreTrainedModel: The created auto model instance.
-        """
         config.model_parallel, max_memory, device_map = self.init_model_parallel(
             config.model_parallel
         )
