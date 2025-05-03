@@ -26,8 +26,8 @@ def partial_rope_mask(model_args, mha2mla_args):
         """
         mask[:rope_dim_for_mla_half] = 1
         mask[d_head_half : d_head_half + rope_dim_for_mla_half] = 1
-        q_masks = mask.repeat(n_head)
-        k_masks = mask.repeat(n_k_head)
+        q_masks = mask.repeat(n_head).bool()
+        k_masks = mask.repeat(n_k_head).bool()
         return q_masks, k_masks
 
     def select_low_frequency(mask):
@@ -38,8 +38,8 @@ def partial_rope_mask(model_args, mha2mla_args):
         """
         mask[d_head - rope_dim_for_mla_half :] = 1
         mask[d_head_half - rope_dim_for_mla_half : d_head_half] = 1
-        q_masks = mask.repeat(n_head)
-        k_masks = mask.repeat(n_k_head)
+        q_masks = mask.repeat(n_head).bool()
+        k_masks = mask.repeat(n_k_head).bool()
         return q_masks, k_masks
 
     def select_uniform_frequency(mask, start_point):
@@ -53,8 +53,8 @@ def partial_rope_mask(model_args, mha2mla_args):
 
         for i in range(start_point, d_head, step):
             mask[i] = 1
-        q_masks = mask.repeat(n_head)
-        k_masks = mask.repeat(n_k_head)
+        q_masks = mask.repeat(n_head).bool()
+        k_masks = mask.repeat(n_k_head).bool()
         return q_masks, k_masks
 
     def select_2norm_frequency(mask, rope_dim_for_mla):
