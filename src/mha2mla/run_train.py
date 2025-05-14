@@ -47,7 +47,7 @@ def main():
         mha_model = AutoModelForCausalLM.from_pretrained(name)
     else:
         mha_model = AutoModelForCausalLM.from_config(model_args)
-    if not mha2mla_args.is_baseline:
+    if not mha2mla_args.is_baseline or mha2mla_args.is_mla_from_scratch:
         mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
         if isinstance(mha_model, LlamaForCausalLM):
             mha2mla_llama(q_idx, k_idx)
