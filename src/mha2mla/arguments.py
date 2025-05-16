@@ -72,6 +72,10 @@ class MHA2MLAModelArguments:
                 f"svd_init_method must be one of {valid_svd_methods}, got '{self.svd_init_method}'"
             )
 
+        # Check bool arguments to avoid conflict
+        if self.is_gqa2mha2mla or self.is_mla_from_scratch:
+            assert self.is_baseline == False, f"is_baseline must set to False when is_gqa2mha2mla=={self.is_gqa2mha2mla} or is_mla_from_scratch=={self.is_mla_from_scratch}"
+
 
 @dataclass
 class MHA2MLADataArguments:

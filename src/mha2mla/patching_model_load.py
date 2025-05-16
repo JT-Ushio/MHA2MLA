@@ -93,13 +93,17 @@ def patch_model(model, model_args, mha2mla_args):
         k_idx.append(k_r_indices)
         print(f"Layer {layer_idx}: Set up q_proj, k_r_proj, and kv_proj")
 
-    if hasattr(mha2mla_args,"is_mla_from_scratch") and mha2mla_args.is_mla_from_scratch:
-        # Randomly initialize the weights of the self_attn module
-        print(f"Randomly initialize the weights of the self_attn module")
-        for layer_idx, layer in enumerate(model.model.layers):
+        # 5. [Optional] Randomly init if is_mla_from_scratch == True
+        if mha2mla_args.is_mla_from_scratch:
+            std = model_args.initializer_range
             for name, param in layer.self_attn.named_parameters():
+                if 'o_proj' in name or 'proj' not in name:
+                    continue
                 if 'weight' in name:
-                    nn.init.xavier_uniform_(param)
-                elif 'bias' in name:
-                    nn.init.normal_(param)
+                    param.data.normal_(mean=0.0, std=std)
+                    print(f"Reinit {name}")
+                if 'bias' in name:
+                    param.data.zero_()
+                    print(f"Reinit {name}")
+
     return model, q_idx, k_idx
