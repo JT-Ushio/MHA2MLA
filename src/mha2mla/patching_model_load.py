@@ -38,6 +38,7 @@ def patch_model(model, model_args, mha2mla_args):
     q_masks, k_masks = partial_rope_mask(model_args, mha2mla_args)
 
     n_k_head, n_head = model_args.num_key_value_heads, model_args.num_attention_heads
+    d_head = model_args.head_dim
     q_idx = []
     k_idx = []
     for layer_idx, layer in enumerate(model.model.layers):
@@ -73,6 +74,18 @@ def patch_model(model, model_args, mha2mla_args):
             k_r_proj.bias.data.copy_(k_bias[k_r_indices])
         layer.self_attn.k_r_proj = k_r_proj
 
+        # Reorder Q_Norm/K_Norm (e.g., Qwen3) if exist
+        if hasattr(layer.self_attn, "q_norm"):
+            # TODO: support olmo's Q_Norm/K_Norm
+            assert mha2mla_args.partial_rope_version != "2_norm", (
+                "Qwen3 does not suppert 2_norm yet."
+            )
+            norm_indices = reorder_matrix_rows(q_mask[:d_head], is_cat=True)
+            qn_weight = layer.self_attn.q_norm.weight
+            kn_weight = layer.self_attn.k_norm.weight
+            layer.self_attn.q_norm.weight.data.copy_(qn_weight[norm_indices])
+            layer.self_attn.k_norm.weight.data.copy_(kn_weight[norm_indices])
+
         # 3. Setup low-rank kv_proj
         kv_proj = svd_low_rank_approx(
             k_c_weight=k_weight[k_c_indices],
@@ -97,12 +110,12 @@ def patch_model(model, model_args, mha2mla_args):
         if mha2mla_args.is_mla_from_scratch:
             std = model_args.initializer_range
             for name, param in layer.self_attn.named_parameters():
-                if 'o_proj' in name or 'proj' not in name:
+                if "o_proj" in name or "proj" not in name:
                     continue
-                if 'weight' in name:
+                if "weight" in name:
                     param.data.normal_(mean=0.0, std=std)
                     print(f"Reinit {name}")
-                if 'bias' in name:
+                if "bias" in name:
                     param.data.zero_()
                     print(f"Reinit {name}")
 

@@ -1,17 +1,20 @@
 import inspect
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 from transformers import Cache
 from transformers.utils import logging
+from transformers.processing_utils import Unpack
+from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.llama import modeling_llama
 from transformers.models.llama.modeling_llama import (
-    repeat_kv,
     rotate_half,
-    LlamaSdpaAttention,
+    LlamaAttention,
+    eager_attention_forward,
 )
 
-from mla_triton_kernel import decode_attention_fwd
+# from mla_triton_kernel import decode_attention_fwd
 
 logger = logging.get_logger(__name__)
 
@@ -67,118 +70,80 @@ def create_custom_apply_rotary_pos_emb(q_r_indices, k_r_indices):
     return custom_apply_rotary_pos_emb
 
 
-# Adapted from LlamaAttention.forward
-def custom_LlamaSdpaAttention_forward(
+def custom_LlamaAttention_forward(
     self,
     hidden_states: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    position_ids: Optional[torch.LongTensor] = None,
+    position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+    attention_mask: Optional[torch.Tensor],
     past_key_value: Optional[Cache] = None,
-    output_attentions: bool = False,
-    use_cache: bool = False,
     cache_position: Optional[torch.LongTensor] = None,
-    position_embeddings: Optional[
-        Tuple[torch.Tensor, torch.Tensor]
-    ] = None,  # will become mandatory in v4.46
-    **kwargs,
+    **kwargs: Unpack[FlashAttentionKwargs],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-    if output_attentions:
-        # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
-        logger.warning_once(
-            "LlamaModel is using LlamaSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
-            'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
-        )
-        return super().forward(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings=position_embeddings,
-        )
-
-    bsz, q_len, _ = hidden_states.size()
+    input_shape = hidden_states.shape[:-1]
+    hidden_shape = (*input_shape, -1, self.head_dim)
 
     query_states = self.q_proj(hidden_states)
     # NOTE: key_states = self.k_proj(hidden_states)
     key_r_states = self.k_r_proj(hidden_states)
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
-    is_gqa2mha2mla = key_c_states.size(-1) + key_r_states.size(-1) != value_states.size(-1)
-    n_k_head = self.num_heads if is_gqa2mha2mla else self.num_key_value_heads
-    key_r_states = key_r_states.view(bsz, q_len, n_k_head, -1).transpose(1, 2)
-    key_c_states = key_c_states.view(bsz, q_len, n_k_head, -1).transpose(1, 2)
-    query_r_states = query_states[..., :self.num_heads*key_r_states.size(-1)]
-    query_c_states = query_states[..., self.num_heads*key_r_states.size(-1):]
-    query_r_states = query_r_states.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
-    query_c_states = query_c_states.view(bsz, q_len, self.num_heads, -1).transpose(1, 2)
-    value_states = value_states.view(
-        bsz, q_len, self.num_key_value_heads, self.head_dim
-    ).transpose(1, 2)
-    if position_embeddings is None:
-        logger.warning_once(
-            "The attention layers in this model are transitioning from computing the RoPE embeddings internally "
-            "through `position_ids` (2D tensor with the indexes of the tokens), to using externally computed "
-            "`position_embeddings` (Tuple of tensors, containing cos and sin). In v4.46 `position_ids` will be "
-            "removed and `position_embeddings` will be mandatory."
-        )
-        cos, sin = self.rotary_emb(value_states, position_ids)
-    else:
-        cos, sin = position_embeddings
-    # key_r_states = repeat_kv(key_r_states, self.num_key_value_groups)
+
+    query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+    value_states = value_states.view(hidden_shape).transpose(1, 2)
+    kv_shape = (*input_shape, value_states.size(1), -1)
+    key_r_states = self.k_r_proj(hidden_states).view(kv_shape).transpose(1, 2)
+    key_c_states = key_c_states.view(kv_shape).transpose(1, 2)
+    query_r_states = query_states[..., : key_r_states.size(-1)]
+    query_c_states = query_states[..., key_r_states.size(-1) :]
+
+    cos, sin = position_embeddings
     query_r_states, key_r_states = modeling_llama.apply_rotary_pos_emb(
         query_r_states, key_r_states, cos, sin
     )
+
     query_states = torch.cat([query_r_states, query_c_states], dim=-1)
-    # key_c_states = repeat_kv(key_c_states, self.num_key_value_groups)
     key_states = torch.cat([key_r_states, key_c_states], dim=-1)
 
+    # NOTE: the code below has not been modified.
     if past_key_value is not None:
         # sin and cos are specific to RoPE models; cache_position needed for the static cache
         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
         key_states, value_states = past_key_value.update(
             key_states, value_states, self.layer_idx, cache_kwargs
         )
-    if not is_gqa2mha2mla:
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-    value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-    causal_mask = attention_mask
-    if attention_mask is not None:
-        causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+    attention_interface: Callable = eager_attention_forward
+    if self.config._attn_implementation != "eager":
+        if self.config._attn_implementation == "sdpa" and kwargs.get(
+            "output_attentions", False
+        ):
+            logger.warning_once(
+                "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
+                'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+            )
+        else:
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
 
-    # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
-    # Reference: https://github.com/pytorch/pytorch/issues/112577.
-    if query_states.device.type == "cuda" and causal_mask is not None:
-        query_states = query_states.contiguous()
-        key_states = key_states.contiguous()
-        value_states = value_states.contiguous()
-
-    # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
-    # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
-    is_causal = True if causal_mask is None and q_len > 1 else False
-
-    attn_output = torch.nn.functional.scaled_dot_product_attention(
+    attn_output, attn_weights = attention_interface(
+        self,
         query_states,
         key_states,
         value_states,
-        attn_mask=causal_mask,
-        dropout_p=self.attention_dropout if self.training else 0.0,
-        is_causal=is_causal,
+        attention_mask,
+        dropout=0.0 if not self.training else self.attention_dropout,
+        scaling=self.scaling,
+        **kwargs,
     )
 
-    attn_output = attn_output.transpose(1, 2).contiguous()
-    attn_output = attn_output.view(bsz, q_len, -1)
-
+    attn_output = attn_output.reshape(*input_shape, -1).contiguous()
     attn_output = self.o_proj(attn_output)
-
-    return attn_output, None, past_key_value
+    return attn_output, attn_weights
 
 
 def mha2mla_llama(q_idx, k_idx):
-    LlamaSdpaAttention.forward = custom_LlamaSdpaAttention_forward
+    LlamaAttention.forward = custom_LlamaAttention_forward
     modeling_llama.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb(
         q_idx, k_idx
     )

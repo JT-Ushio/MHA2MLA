@@ -7,11 +7,11 @@ from transformers.utils import logging
 from transformers.processing_utils import Unpack
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.qwen2 import modeling_qwen2
-from transformers.models.qwen2.modeling_qwen2 import (
+from transformers.models.qwen3 import modeling_qwen3
+from transformers.models.qwen3.modeling_qwen3 import (
     rotate_half,
     eager_attention_forward,
-    Qwen2Attention,
+    Qwen3Attention,
 )
 
 logger = logging.get_logger(__name__)
@@ -69,7 +69,7 @@ def create_custom_apply_rotary_pos_emb(q_r_indices, k_r_indices):
     return custom_apply_rotary_pos_emb
 
 
-def custom_Qwen2Attention_forward(
+def custom_Qwen3Attention_forward(
     self,
     hidden_states: torch.Tensor,
     position_embeddings: Tuple[torch.Tensor, torch.Tensor],
@@ -96,12 +96,12 @@ def custom_Qwen2Attention_forward(
     query_c_states = query_states[..., key_r_states.size(-1) :]
 
     cos, sin = position_embeddings
-    query_r_states, key_r_states = modeling_qwen2.apply_rotary_pos_emb(
+    query_r_states, key_r_states = modeling_qwen3.apply_rotary_pos_emb(
         query_r_states, key_r_states, cos, sin
     )
 
-    query_states = torch.cat([query_r_states, query_c_states], dim=-1)
-    key_states = torch.cat([key_r_states, key_c_states], dim=-1)
+    query_states = self.q_norm(torch.cat([query_r_states, query_c_states], dim=-1))
+    key_states = self.k_norm(torch.cat([key_r_states, key_c_states], dim=-1))
 
     # NOTE: the code below has not been modified.
     if past_key_value is not None:
@@ -150,8 +150,8 @@ def custom_Qwen2Attention_forward(
     return attn_output, attn_weights
 
 
-def mha2mla_qwen2(q_idx, k_idx):
-    Qwen2Attention.forward = custom_Qwen2Attention_forward
-    modeling_qwen2.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb(
+def mha2mla_qwen3(q_idx, k_idx):
+    Qwen3Attention.forward = custom_Qwen3Attention_forward
+    modeling_qwen3.apply_rotary_pos_emb = create_custom_apply_rotary_pos_emb(
         q_idx, k_idx
     )

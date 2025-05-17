@@ -11,7 +11,7 @@ def partial_rope_mask(model_args, mha2mla_args):
     """
     n_head = model_args.num_attention_heads
     n_k_head = model_args.num_key_value_heads
-    d_head = model_args.hidden_size // n_head
+    d_head = model_args.head_dim
     d_head_half = d_head // 2
     rope_dim_for_mla = mha2mla_args.rope_dim_for_mla
     rope_dim_for_mla_half = rope_dim_for_mla // 2
