@@ -69,17 +69,23 @@ def main():
     optimizer, lr_scheduler = load_optimizer_scheduler(model, train_args)
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
 
-    # training
-    trainer = Trainer(
-        model=model,
-        tokenizer=tokenizer,
-        args=train_args,
-        train_dataset=train_dataset,
-        optimizers=(optimizer, lr_scheduler),
-        data_collator=data_collator,
-    )
-    trainer.train(resume_from_checkpoint)
-    trainer.log(asdict(mha2mla_args))
+    if train_args.max_steps == 0:
+        state_dict = model.state_dict()
+        if model.config.tie_word_embeddings:
+            state_dict["lm_head.weight"] = state_dict["model.embed_tokens.weight"].clone()
+        model.save_pretrained(train_args.output_dir, state_dict=state_dict)
+    else:
+        # training
+        trainer = Trainer(
+            model=model,
+            tokenizer=tokenizer,
+            args=train_args,
+            train_dataset=train_dataset,
+            optimizers=(optimizer, lr_scheduler),
+            data_collator=data_collator,
+        )
+        trainer.train(resume_from_checkpoint)
+        trainer.log(asdict(mha2mla_args))
 
 
 if __name__ == "__main__":

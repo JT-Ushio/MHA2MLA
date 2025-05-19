@@ -164,7 +164,7 @@ class LowRankKVLinear(nn.Module):
 
 
 def SVD(X, r):
-    U, S, V = torch.linalg.svd(X, full_matrices=False)
+    U, S, V = torch.linalg.svd(X.to(torch.float32), full_matrices=False)
     U, S, V = U[:, :r], S[:r], V[:r, :]
     U @= torch.diag(S)
     return V, U
