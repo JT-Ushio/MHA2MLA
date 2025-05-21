@@ -38,7 +38,10 @@ def patch_model(model, model_args, mha2mla_args):
     q_masks, k_masks = partial_rope_mask(model_args, mha2mla_args)
 
     n_k_head, n_head = model_args.num_key_value_heads, model_args.num_attention_heads
-    d_head = model_args.head_dim
+    if hasattr(model_args, "head_dim"):
+        d_head = model_args.head_dim
+    else:
+        d_head = model_args.hidden_size // n_head
     q_idx = []
     k_idx = []
     for layer_idx, layer in enumerate(model.model.layers):

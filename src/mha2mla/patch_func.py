@@ -11,7 +11,10 @@ def partial_rope_mask(model_args, mha2mla_args):
     """
     n_head = model_args.num_attention_heads
     n_k_head = model_args.num_key_value_heads
-    d_head = model_args.head_dim
+    if hasattr(model_args, "head_dim"):
+        d_head = model_args.head_dim
+    else:
+        d_head = model_args.hidden_size // n_head
     d_head_half = d_head // 2
     rope_dim_for_mla = mha2mla_args.rope_dim_for_mla
     rope_dim_for_mla_half = rope_dim_for_mla // 2
@@ -109,7 +112,7 @@ class LowRankKVLinear(nn.Module):
     ):
         super().__init__()
         # TODO: add activations after down_kv
-        if kv_joint: # (x * W_q）* （x * down_kv * up_k）
+        if kv_joint:  # (x * W_q）* （x * down_kv * up_k）
             self.down_kv = nn.Linear(in_features=d_in, out_features=d_mid, bias=False)
         if not kv_joint and k_approx:
             self.down_k = nn.Linear(in_features=d_in, out_features=d_mid, bias=False)
@@ -176,7 +179,9 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
 
     if method == "only_key":
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
-        kv_proj = LowRankKVLinear(d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, k_approx=True, bias=has_bias)
+        kv_proj = LowRankKVLinear(
+            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, k_approx=True, bias=has_bias
+        )
         kv_proj.reset_parameters(
             down_k_weight=down_k,
             up_k_weight=up_k,
@@ -186,7 +191,9 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
         )
     elif method == "only_value":
         down_v, up_v = SVD(v_weight, d_kv_mid)
-        kv_proj = LowRankKVLinear(d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, v_approx=True, bias=has_bias)
+        kv_proj = LowRankKVLinear(
+            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, v_approx=True, bias=has_bias
+        )
         kv_proj.reset_parameters(
             down_v_weight=down_v,
             up_k_weight=k_c_weight,
@@ -198,7 +205,13 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
         down_k, up_k = SVD(k_c_weight, d_kv_mid)
         down_v, up_v = SVD(v_weight, d_kv_mid)
         kv_proj = LowRankKVLinear(
-            d_kv_in, d_k_c, d_v, d_mid=d_kv_mid, k_approx=True, v_approx=True, bias=has_bias
+            d_kv_in,
+            d_k_c,
+            d_v,
+            d_mid=d_kv_mid,
+            k_approx=True,
+            v_approx=True,
+            bias=has_bias,
         )
         kv_proj.reset_parameters(
             down_k_weight=down_k,
@@ -232,6 +245,9 @@ def svd_low_rank_approx(k_c_weight, k_c_bias, v_weight, v_bias, d_kv_mid, method
     elif method == "none":
         kv_proj = LowRankKVLinear(d_kv_in, d_k_c, d_v, bias=has_bias)
         kv_proj.reset_parameters(
-            up_k_weight=k_c_weight, up_v_weight=v_weight, up_k_bias=k_c_bias, up_v_bias=v_bias
+            up_k_weight=k_c_weight,
+            up_v_weight=v_weight,
+            up_k_bias=k_c_bias,
+            up_v_bias=v_bias,
         )
     return kv_proj

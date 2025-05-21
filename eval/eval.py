@@ -17,6 +17,7 @@ from transformers import (
     AutoConfig,
     LlamaForCausalLM,
     Qwen2ForCausalLM,
+    Qwen3ForCausalLM,
 )
 import types
 from lighteval.models.model_loader import BaseModel
@@ -28,13 +29,13 @@ target_directory = os.path.join(
 sys.path.append(str(target_directory))
 from patching_model_load import patch_model
 from patching_qwen2 import mha2mla_qwen2
+from patching_qwen3 import mha2mla_qwen3
 from patching_llama import mha2mla_llama
 
 from safetensors.torch import load_file
 
 
 def create_load_func(mha2mla_args):
-
     def _create_auto_model(
         self, config: BaseModelConfig, env_config: EnvConfig
     ) -> transformers.PreTrainedModel:
@@ -46,7 +47,8 @@ def create_load_func(mha2mla_args):
         if mha2mla_args is None or mha2mla_args.is_baseline:
             model = AutoModelForCausalLM.from_pretrained(
                 ckpt_path,
-                revision=config.revision + (f"/{config.subfolder}" if config.subfolder is not None else ""),
+                revision=config.revision
+                + (f"/{config.subfolder}" if config.subfolder is not None else ""),
                 max_memory=max_memory,
                 device_map=device_map,
                 torch_dtype=torch_dtype,
@@ -68,6 +70,8 @@ def create_load_func(mha2mla_args):
                 mha2mla_llama(q_idx, k_idx)
             elif isinstance(mha_model, Qwen2ForCausalLM):
                 mha2mla_qwen2(q_idx, k_idx)
+            elif isinstance(mha_model, Qwen3ForCausalLM):
+                mha2mla_qwen3(q_idx, k_idx)
             # Load weights
             signle_weight_file = os.path.join(ckpt_path, "model.safetensors")
             if os.path.exists(signle_weight_file):
@@ -77,6 +81,7 @@ def create_load_func(mha2mla_args):
                 load_result = load_sharded_checkpoint(mla_model, ckpt_path)
             model = mla_model.to(dtype=torch_dtype)
         return model
+
     return _create_auto_model
 
 
@@ -103,10 +108,7 @@ def cli_evaluate():  # noqa: C901
     ckpt_path = model_args["pretrained"]
     model_config = AutoConfig.from_pretrained(ckpt_path)
 
-    if (
-        hasattr(model_config, "mha2mla")
-        and not model_config.mha2mla["is_baseline"]
-    ):
+    if hasattr(model_config, "mha2mla") and not model_config.mha2mla["is_baseline"]:
         mha2mla_args = types.SimpleNamespace(**model_config.mha2mla)
         BaseModel._create_auto_model = create_load_func(mha2mla_args)
 
