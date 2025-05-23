@@ -81,9 +81,6 @@ def custom_Qwen3Attention_forward(
     input_shape = hidden_states.shape[:-1]
     hidden_shape = (*input_shape, -1, self.head_dim)
 
-    query_states = self.q_proj(hidden_states)
-    # NOTE: key_states = self.k_proj(hidden_states)
-    key_r_states = self.k_r_proj(hidden_states)
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
 
