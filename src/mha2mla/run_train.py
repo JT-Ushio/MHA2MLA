@@ -8,6 +8,7 @@ from transformers import (
     AutoModelForCausalLM,
     Qwen2ForCausalLM,
     Qwen3ForCausalLM,
+    Qwen3MoeForCausalLM,
     LlamaForCausalLM,
     HfArgumentParser,
     DataCollatorForLanguageModeling,
@@ -23,6 +24,7 @@ from helpers import load_dataset, load_optimizer_scheduler
 from patching_model_load import patch_model
 from patching_qwen2 import mha2mla_qwen2
 from patching_qwen3 import mha2mla_qwen3
+from patching_qwen3_moe import mha2mla_qwen3_moe
 from patching_llama import mha2mla_llama
 
 logger = logging.get_logger(__name__)
@@ -49,14 +51,18 @@ def main():
         mha_model = AutoModelForCausalLM.from_pretrained(name)
     else:
         mha_model = AutoModelForCausalLM.from_config(model_args)
+    print(mha_model)
     if not mha2mla_args.is_baseline or mha2mla_args.is_mla_from_scratch:
         mla_model, q_idx, k_idx = patch_model(mha_model, model_args, mha2mla_args)
+        # TODO: move instance selection to patch_func.py
         if isinstance(mha_model, LlamaForCausalLM):
             mha2mla_llama(q_idx, k_idx)
         elif isinstance(mha_model, Qwen2ForCausalLM):
             mha2mla_qwen2(q_idx, k_idx)
         elif isinstance(mha_model, Qwen3ForCausalLM):
             mha2mla_qwen3(q_idx, k_idx)
+        elif isinstance(mha_model, Qwen3MoeForCausalLM):
+            mha2mla_qwen3_moe(q_idx, k_idx)
     model = mha_model if mha2mla_args.is_baseline else mla_model
     model.config.mha2mla = asdict(mha2mla_args)
 
