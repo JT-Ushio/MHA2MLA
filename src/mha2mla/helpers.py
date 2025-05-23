@@ -17,6 +17,15 @@ from transformers import get_scheduler
 logger = logging.getLogger(__name__)
 
 
+def freeze_non_attn_weights(model):
+    print('......freeze_non_attn_weights......')
+    for param in model.parameters():
+        param.requires_grad = False
+    for name, param in model.named_parameters():
+        if "attn" in name or "norm" in name: 
+            param.requires_grad = True
+
+
 def load_optimizer_scheduler(model, train_args):
     """Load optimizer and scheduler from configuration."""
     optimizer_name = train_args.optim

@@ -20,7 +20,7 @@ from arguments import (
     MHA2MLADataArguments,
     MHA2MLATrainingArguments,
 )
-from helpers import load_dataset, load_optimizer_scheduler
+from helpers import load_dataset, load_optimizer_scheduler, freeze_non_attn_weights
 from patching_model_load import patch_model
 from patching_qwen2 import mha2mla_qwen2
 from patching_qwen3 import mha2mla_qwen3
@@ -64,6 +64,8 @@ def main():
         elif isinstance(mha_model, Qwen3MoeForCausalLM):
             mha2mla_qwen3_moe(q_idx, k_idx)
     model = mha_model if mha2mla_args.is_baseline else mla_model
+    if train_args.is_freeze_non_attn:
+        freeze_non_attn_weights(model)
     model.config.mha2mla = asdict(mha2mla_args)
 
     if train_args.bf16:

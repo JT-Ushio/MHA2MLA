@@ -106,3 +106,7 @@ class MHA2MLATrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Whether to use constant with warmup decay scheduler"},
     )
+    is_freeze_non_attn: bool = field(
+        default=False,
+        metadata={"help": "if the finetuning is freeze non attention parameters"},
+    )
