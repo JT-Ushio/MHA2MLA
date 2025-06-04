@@ -1,16 +1,26 @@
 import bisect
 from dataclasses import dataclass
-import os
+import os, sys
 import re
 import string
 from collections import Counter, defaultdict
 from itertools import accumulate
+from transformers.modeling_utils import load_sharded_checkpoint
 from typing import TYPE_CHECKING, Optional
-from transformers import HfArgumentParser, AutoTokenizer, AutoModelForCausalLM
+from transformers import (
+    HfArgumentParser,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoConfig,
+    LlamaForCausalLM,
+    Qwen2ForCausalLM,
+    Qwen3ForCausalLM,
+)
+import types
 import logging
 import jieba
 import pandas as pd
-import torch#
+import torch
 import transformers
 from accelerate.utils import gather_object
 from datasets import load_dataset
@@ -28,6 +38,18 @@ from transformers import (
     TrainingArguments,
 )
 
+current_file_path = os.path.abspath(__file__)
+target_directory = os.path.join(
+    os.path.dirname(os.path.dirname(current_file_path)), "src", "mha2mla"
+)
+sys.path.append(str(target_directory))
+from patching_model_load import patch_model
+from patching_qwen2 import mha2mla_qwen2
+from patching_qwen3 import mha2mla_qwen3
+from patching_llama import mha2mla_llama
+
+from safetensors.torch import load_file
+
 
 @dataclass
 class LongBenchArguments:
@@ -38,8 +60,6 @@ class LongBenchArguments:
 
 @dataclass
 class MLAArguments:
-    is_partial_rope: bool = False
-    is_mla: bool = False
     model_path: str = ""
     tokenizer_path: str = ""
     dtype: str = "float32"
@@ -53,10 +73,9 @@ class CacheArguments:
     residual_length: int = 128
 
 
-
 logger = logging.getLogger(__name__)
 
-LEN2NAME = {1 << (10 + i): f"{1<<i}k" for i in range(9)}
+LEN2NAME = {1 << (10 + i): f"{1 << i}k" for i in range(9)}
 
 
 class RunLongBenchCallback(TrainerCallback):
@@ -98,7 +117,6 @@ class RunLongBenchCallback(TrainerCallback):
     def run(self, output_dir: Optional[str] = None):
         self.runV1(self.dataloaderV1, "lbv1", output_dir)
 
-
     def runV1(
         self,
         dataloader,
@@ -134,7 +152,9 @@ class RunLongBenchCallback(TrainerCallback):
                 == len(should_save)
                 == len(pred)
                 == len(score)
-            ), f"{len(_id)=}, {len(dataset)=}, {len(answers)=}, {len(all_classes)=}, {len(max_gen)=}, {len(should_save)=} {len(pred)=}, {len(score)=}"
+            ), (
+                f"{len(_id)=}, {len(dataset)=}, {len(answers)=}, {len(all_classes)=}, {len(max_gen)=}, {len(should_save)=} {len(pred)=}, {len(score)=}"
+            )
             for i, d, a, c, save, p, s in zip(
                 _id, dataset, answers, all_classes, should_save, pred, score
             ):
@@ -589,6 +609,43 @@ dataset2metric = {
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def load_model(ckpt_path, dtype):
+    model_config = AutoConfig.from_pretrained(ckpt_path)
+
+    if hasattr(model_config, "mha2mla") and not model_config.mha2mla["is_baseline"]:
+        mha2mla_args = types.SimpleNamespace(**model_config.mha2mla)
+        if mha2mla_args is None or mha2mla_args.is_baseline:
+            model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(
+                device, dtype=dtype
+            )
+        else:
+            # Instance
+            model_config = AutoConfig.from_pretrained(ckpt_path)
+            mha_model = AutoModelForCausalLM.from_config(
+                model_config,
+                trust_remote_code=True,
+            )
+            mla_model, q_idx, k_idx = patch_model(mha_model, model_config, mha2mla_args, resume=True)
+            if isinstance(mha_model, LlamaForCausalLM):
+                mha2mla_llama(q_idx, k_idx)
+            elif isinstance(mha_model, Qwen2ForCausalLM):
+                mha2mla_qwen2(q_idx, k_idx)
+            elif isinstance(mha_model, Qwen3ForCausalLM):
+                mha2mla_qwen3(q_idx, k_idx)
+            # Load weights
+            signle_weight_file = os.path.join(ckpt_path, "model.safetensors")
+            if os.path.exists(signle_weight_file):
+                state_dict = load_file(signle_weight_file)
+                mla_model.load_state_dict(state_dict)
+            else:
+                load_result = load_sharded_checkpoint(mla_model, ckpt_path)
+            model = mla_model.to(dtype=dtype)
+        return model
+    else:
+        model = AutoModelForCausalLM.from_pretrained(ckpt_path).to(device, dtype=dtype)
+        return model
+
+
 def main():
     parser = HfArgumentParser(
         (TrainingArguments, LongBenchArguments, MLAArguments, CacheArguments)
@@ -600,15 +657,6 @@ def main():
         if mla_args.tokenizer_path is not None
         else mla_args.model_path
     )
-    if mla_args.is_partial_rope:
-        raise NotImplementedError("Not implemented for partial-rope")
-    if mla_args.is_mla:
-        import json, os
-
-        with open(os.path.join(model_path, "config.json")) as f:
-            config = json.load(f)
-        from monkey_patch import mla_monkey_patch
-        mla_monkey_patch(config["RoPE"])
 
     if mla_args.dtype == "float32":
         dtype = torch.float32
@@ -618,7 +666,7 @@ def main():
         dtype = torch.bfloat16
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path).to(device, dtype=dtype)
+    model = load_model(model_path, dtype).to(device, dtype=dtype)
     tokenizer.pad_token = tokenizer.eos_token
 
     trainer = Trainer(

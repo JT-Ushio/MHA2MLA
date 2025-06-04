@@ -54,14 +54,13 @@ def create_custom_apply_rotary_pos_emb(q_r_indices, k_r_indices):
         q_idx = q_r_indices[layer_idx].to(q.device)
         cos_q = cos.repeat(1, 1, q.size(1)).index_select(-1, q_idx)
         sin_q = sin.repeat(1, 1, q.size(1)).index_select(-1, q_idx)
-        cos_q = cos_q.reshape(1, q.size(2), q.size(1), -1).transpose(1, 2)
-        sin_q = sin_q.reshape(1, q.size(2), q.size(1), -1).transpose(1, 2)
+        cos_q = cos_q.reshape(cos_q.size(0), q.size(2), q.size(1), -1).transpose(1, 2)
+        sin_q = sin_q.reshape(sin_q.size(0), q.size(2), q.size(1), -1).transpose(1, 2)
         k_idx = k_r_indices[layer_idx].to(k.device)
         cos_k = cos.repeat(1, 1, k.size(1)).index_select(-1, k_idx)
         sin_k = sin.repeat(1, 1, k.size(1)).index_select(-1, k_idx)
-        cos_k = cos_k.reshape(1, k.size(2), k.size(1), -1).transpose(1, 2)
-        sin_k = sin_k.reshape(1, k.size(2), k.size(1), -1).transpose(1, 2)
-
+        cos_k = cos_k.reshape(cos_k.size(0), k.size(2), k.size(1), -1).transpose(1, 2)
+        sin_k = sin_k.reshape(sin_k.size(0), k.size(2), k.size(1), -1).transpose(1, 2)
         q_embed = (q * cos_q) + (rotate_half(q) * sin_q)
         k_embed = (k * cos_k) + (rotate_half(k) * sin_k)
 
