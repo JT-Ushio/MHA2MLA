@@ -79,14 +79,15 @@ def custom_Qwen3MoeAttention_forward(
     **kwargs: Unpack[FlashAttentionKwargs],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     input_shape = hidden_states.shape[:-1]
-    hidden_shape = (*input_shape, -1, self.head_dim)
+    kv_shape = (*input_shape, self.config.num_key_value_heads, -1)
+    num_q_heads = self.config.num_attention_heads
+    q_shape = (*input_shape, num_q_heads, -1)
 
     # NOTE: value_states = self.v_proj(hidden_states)
     key_c_states, value_states = self.kv_proj.mha_forward(hidden_states)
 
-    query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
-    value_states = value_states.view(hidden_shape).transpose(1, 2)
-    kv_shape = (*input_shape, value_states.size(1), -1)
+    query_states = self.q_proj(hidden_states)
+    value_states = value_states.view(kv_shape).transpose(1, 2)
     key_r_states = self.k_r_proj(hidden_states).view(kv_shape)#.transpose(1, 2)
     key_c_states = key_c_states.view(kv_shape)#.transpose(1, 2)
     key_states = self.k_norm(
@@ -94,6 +95,12 @@ def custom_Qwen3MoeAttention_forward(
     ).transpose(1, 2)
     key_r_states = key_states[..., : key_r_states.size(-1)]
     key_c_states = key_states[..., key_r_states.size(-1) :]
+
+    query_r_states = query_states[..., :num_q_heads*key_r_states.size(-1)]
+    query_c_states = query_states[..., num_q_heads*key_r_states.size(-1):]
+    query_states = self.q_norm(
+        torch.cat([query_r_states.view(q_shape), query_c_states.view(q_shape)], dim=-1)
+    ).transpose(1, 2)
     query_r_states = query_states[..., : key_r_states.size(-1)]
     query_c_states = query_states[..., key_r_states.size(-1) :]
 
