@@ -54,7 +54,7 @@ dataset_folders:
   - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/python-edu/
   - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/open-web-math/
   - /cpfs01/shared/llm_ddd/jitao/data/smollm1_corpus/stackoverflow/
-dataset_weights: # 各数据集的权重
+dataset_weights: 
   - 0.7
   - 0.15
   - 0.08

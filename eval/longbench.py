@@ -625,7 +625,7 @@ def load_model(ckpt_path, dtype):
                 model_config,
                 trust_remote_code=True,
             )
-            mla_model, q_idx, k_idx = patch_model(mha_model, model_config, mha2mla_args, resume=True)
+            mla_model, q_idx, k_idx = patch_model(mha_model, model_config, mha2mla_args)
             if isinstance(mha_model, LlamaForCausalLM):
                 mha2mla_llama(q_idx, k_idx)
             elif isinstance(mha_model, Qwen2ForCausalLM):

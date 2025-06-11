@@ -14,7 +14,6 @@ from transformers.models.llama.modeling_llama import (
     eager_attention_forward,
 )
 
-# from mla_triton_kernel import decode_attention_fwd
 
 logger = logging.get_logger(__name__)
 

@@ -56,7 +56,7 @@ dataset_folders:
   - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen2/python-edu/
   - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen2/open-web-math/
   - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen2/stackoverflow/
-dataset_weights: # 各数据集的权重
+dataset_weights:
   - 0.7
   - 0.15
   - 0.08
