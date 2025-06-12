@@ -58,10 +58,8 @@ torchrun --nproc_per_node 4 \
 > 
 > ```sh
 > torchrun --nproc_per_node 1 \
->     ../src/mha2mla/2_norm.py \
->     --config_file ../configs_hf/rope/135M_4GPU.yaml \
->     --output_dir ./qk_tensor_hf_test.pth \
->     --sample_size 1024
+>     ./src/mha2mla/2_norm.py \
+>     --config_file ./cfgs/SmolLM1-135M-8GPU.yaml \
 > ```
 
 ## Lighteval Evaluation
