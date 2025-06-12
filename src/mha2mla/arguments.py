@@ -110,3 +110,11 @@ class MHA2MLATrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "if the finetuning is freeze non attention parameters"},
     )
+@dataclass
+class QKNormArguments:
+    qk_output_dir: Optional[str] = field(
+        default=None, metadata={"help": "path of qk_rank"}
+    )
+    sample_size: Optional[int] = field(
+        default=1024, metadata={"help": "calibration dataset sample size"}
+    )

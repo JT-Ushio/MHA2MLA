@@ -1,20 +1,47 @@
 from dataclasses import dataclass
 import torch
-from transformers import TrainingArguments
-from transformers import HfArgumentParser, DataCollatorForLanguageModeling
+from transformers import (
+    HfArgumentParser,
+    DataCollatorForLanguageModeling,
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    AutoConfig,
+    Qwen2ForCausalLM,
+    LlamaForCausalLM,
+)
 import os
 from tqdm import tqdm
 import datasets
 
-from run_train import (
-    ModelArguments,
-    DataArguments,
-    load_config,
-    load_dataset,
-    load_tokenizer_and_model,
+from typing import Dict
+from helpers import load_dataset
+from arguments import (
+    MHA2MLAModelArguments,
+    MHA2MLADataArguments,
+    MHA2MLATrainingArguments,
+    QKNormArguments,
 )
 
+
+def load_tokenizer_and_model(model_args: MHA2MLAModelArguments):
+    """Load tokenizer and model from configuration."""
+    assert model_args.model_name_or_path is not None, (
+        "Must provide the path to the model"
+    )
+    model_args.tokenizer_name_or_path = model_args.model_name_or_path
+
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_args.model_name_or_path, config=config
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    return model, tokenizer
+
+
 hidden_states_dict = {}
+
 
 def create_hook_fn(name):
     def hook(module, args, kwargs, output):
@@ -33,32 +60,25 @@ def main():
         required=True,
         help="Path to the YAML configuration file.",
     )
-    cmd_parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=False,
-        help="Path to the output directory.",
-    )
-    cmd_parser.add_argument(
-        "--sample_size",
-        type=int,
-        default=1024,
-    )
     args = cmd_parser.parse_args()
-    config = load_config(args.config_file)
-    parser = HfArgumentParser((TrainingArguments, ModelArguments, DataArguments))
-    training_args, model_args, dataset_args = parser.parse_dict(config)
-    # assert config["DataArguments"]["DP"] == int(os.environ.get("WORLD_SIZE", 1)), "DP is not equal to WORLD_SIZE"
+    hf_parser = HfArgumentParser(
+        (
+            MHA2MLATrainingArguments,
+            MHA2MLAModelArguments,
+            MHA2MLADataArguments,
+            QKNormArguments,
+        )
+    )
+    train_args, model_args, data_args, qknorm_args = hf_parser.parse_yaml_file(
+        args.config_file
+    )
 
-    # Trainer
     model, tokenizer = load_tokenizer_and_model(model_args)
-    train_dataset = load_dataset(dataset_args, training_args, tokenizer)
-    assert (
-        int(os.getenv("WORLD_SIZE", 1)) == 1
-    ), "Only support single process." 
+    train_dataset = load_dataset(data_args, train_args, tokenizer)
+    assert int(os.getenv("WORLD_SIZE", 1)) == 1, "Only support single process."
 
     def preprocess_function(examples):
-        if "input_ids" in examples: 
+        if "input_ids" in examples:
             return {"input_ids": examples["input_ids"]}
         elif "text" in examples:
             return tokenizer(
@@ -68,7 +88,9 @@ def main():
                 return_tensors="pt",
             )
         else:
-            raise ValueError("Unsupported dataset format. Must be a dictionary containing 'input_ids' or 'text'.")
+            raise ValueError(
+                "Unsupported dataset format. Must be a dictionary containing 'input_ids' or 'text'."
+            )
 
     if isinstance(train_dataset, datasets.Dataset):
         train_dataset = train_dataset.map(preprocess_function, batched=True)
@@ -78,62 +100,110 @@ def main():
         mlm=False,
         return_tensors="pt",
     )
+    batch_size = train_args.per_device_train_batch_size
     data_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
-        batch_size=training_args.per_device_train_batch_size,
+        batch_size=batch_size,
         drop_last=True,
         collate_fn=data_collator,
     )
-    num = args.sample_size
+    data_iter = iter(data_loader)
+    num = qknorm_args.sample_size
     model.eval()
     model.to("cuda")
-    for name, module in model.named_modules():
+
+    if isinstance(model, Qwen2ForCausalLM):
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention
+
+        attn = Qwen2Attention
+    elif isinstance(model, LlamaForCausalLM):
         from transformers.models.llama.modeling_llama import LlamaAttention
-        if not isinstance(module, LlamaAttention):
+
+        attn = LlamaAttention
+
+    for name, module in model.named_modules():
+        if not isinstance(module, attn):
             continue
-        hook_fn = create_hook_fn(name)
-        module.register_forward_hook(hook_fn,with_kwargs=True)
+        hook_fn = create_hook_fn(
+            name
+        )  # name:'model.layers.0.self_attn'moudle:LlamaSdpaAttention
+        module.register_forward_hook(hook_fn, with_kwargs=True)
+
     p_bar = tqdm(total=num)
     model_config = model.config
     head_dim = model_config.hidden_size // model_config.num_attention_heads
     num_layers = model_config.num_hidden_layers
     query_states = [[] for _ in range(num_layers)]
     key_states = [[] for _ in range(num_layers)]
+
     def cal_2_norm(states):
         states = torch.norm(
-            states.reshape(states.shape[0],states.shape[1],states.shape[2],2,-1).transpose(-1,-2),
+            states.reshape(
+                states.shape[0], states.shape[1], states.shape[2], 2, -1
+            ).transpose(-1, -2),
             p=2,
             dim=4,
         )
         return states
+
     with torch.no_grad():
-        for _,batch in enumerate(data_loader):
+        for _ in range(0, num, batch_size):
+            batch = next(data_iter)
             batch = {k: v.to("cuda") for k, v in batch.items()}
             model(**batch)
-            num -= batch["input_ids"].shape[0]
-            p_bar.update(batch["input_ids"].shape[0])
-            for name,module in model.named_modules():
-                if not isinstance(module, LlamaAttention):
+            p_bar.update(batch_size)
+            for name, module in model.named_modules():
+                if not isinstance(module, attn):
                     continue
                 idx = int(name.split(".")[2])
-                bsz,q_len,_ = hidden_states_dict[name].shape
-                q = module.q_proj(hidden_states_dict[name]).reshape(bsz,q_len,model_config.num_attention_heads,head_dim) # [bsz,q_len,num_heads,head_dim]
-                k = module.k_proj(hidden_states_dict[name]).reshape(bsz,q_len,model_config.num_key_value_heads,head_dim)
-                query_states[idx].append(cal_2_norm(q).mean(dim=1,keepdim=False).cpu()) # [bsz,num_heads,head_dim//2]
-                key_states[idx].append(cal_2_norm(k).mean(dim=1,keepdim=False).cpu())
-            if num <= 0:
-                break
-    query_states = torch.stack([torch.cat(query_states[i],dim=0) for i in range(num_layers)],dim=0) # [num_layers,sample_size,num_heads,head_dim//2]
-    key_states = torch.stack([torch.cat(key_states[i],dim=0) for i in range(num_layers)],dim=0)
-    query_states = torch.mean(query_states,dim=1,keepdim=False) # [num_layers,num_heads,head_dim//2]
-    key_states = torch.mean(key_states,dim=1,keepdim=False)
+                bsz, q_len, _ = hidden_states_dict[name].shape
+                q = module.q_proj(hidden_states_dict[name]).reshape(
+                    bsz, q_len, model_config.num_attention_heads, head_dim
+                )  # [bsz,q_len,num_heads,head_dim]
+                k = module.k_proj(hidden_states_dict[name]).reshape(
+                    bsz, q_len, model_config.num_key_value_heads, head_dim
+                )
+                query_states[idx].append(
+                    cal_2_norm(q).mean(dim=1, keepdim=False).cpu()
+                )  # [bsz,num_heads,head_dim//2]
+                key_states[idx].append(cal_2_norm(k).mean(dim=1, keepdim=False).cpu())
+
+    query_states = torch.stack(
+        [torch.cat(query_states[i], dim=0) for i in range(num_layers)], dim=0
+    )  # [num_layers,sample_size,num_heads,head_dim//2]
+    key_states = torch.stack(
+        [torch.cat(key_states[i], dim=0) for i in range(num_layers)], dim=0
+    )
+    query_states = torch.mean(
+        query_states, dim=1, keepdim=False
+    )  # [num_layers,num_heads,head_dim//2]
+    key_states = torch.mean(key_states, dim=1, keepdim=False)
     group_size = model_config.num_attention_heads // model_config.num_key_value_heads
-    key_states = key_states.unsqueeze(2).expand(num_layers,model_config.num_key_value_heads,group_size,model_config.head_dim//2).reshape(num_layers,model_config.num_attention_heads,head_dim//2) # [num_layers,num_heads,head_dim//2]
-    qk_states = query_states + key_states
+    key_states = (
+        key_states.unsqueeze(2)
+        .expand(
+            num_layers,
+            model_config.num_key_value_heads,
+            group_size,
+            head_dim // 2,
+        )
+        .reshape(num_layers, model_config.num_attention_heads, head_dim // 2)
+    )  # [num_layers,num_heads,head_dim//2]
+    qk_states = query_states * key_states
     if group_size > 1:
-        qk_states = qk_states.reshape(num_layers,model_config.num_key_value_heads,group_size,head_dim//2).sum(dim=2,keepdim=False)
-    with open(args.output_dir,"wb") as f:
-        torch.save(qk_states,f)
+        qk_states = qk_states.reshape(
+            num_layers, model_config.num_key_value_heads, group_size, head_dim // 2
+        ).sum(dim=2, keepdim=False)
+    _, sorted_indices = torch.sort(qk_states, dim=-1, descending=True)
+    ranks = torch.empty_like(sorted_indices, dtype=torch.uint8)  # ,dtype=torch.uint8
+    rank_values = torch.arange(qk_states.shape[-1], dtype=torch.uint8).expand_as(
+        qk_states
+    )
+    ranks.scatter_(-1, sorted_indices, rank_values)
+    ranks = torch.cat([ranks, ranks], dim=-1)
+    with open(qknorm_args.qk_output_dir, "wb") as f:
+        torch.save(ranks, f)
+
 
 if __name__ == "__main__":
     main()

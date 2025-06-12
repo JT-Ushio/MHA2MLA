@@ -19,6 +19,7 @@ from arguments import (
     MHA2MLAModelArguments,
     MHA2MLADataArguments,
     MHA2MLATrainingArguments,
+    QKNormArguments
 )
 from helpers import load_dataset, load_optimizer_scheduler, freeze_non_attn_weights
 from patching_model_load import patch_model
@@ -36,9 +37,9 @@ def main():
     cfg_parser.add_argument("--cfg_file", type=str, required=True)
     cfg = cfg_parser.parse_args()
     hf_parser = HfArgumentParser(
-        (MHA2MLATrainingArguments, MHA2MLAModelArguments, MHA2MLADataArguments)
+        (MHA2MLATrainingArguments, MHA2MLAModelArguments, MHA2MLADataArguments, QKNormArguments)
     )
-    train_args, mha2mla_args, data_args = hf_parser.parse_yaml_file(cfg.cfg_file)
+    train_args, mha2mla_args, data_args, _ = hf_parser.parse_yaml_file(cfg.cfg_file)
 
     # load tokenizer and model
     name = mha2mla_args.model_name_or_path

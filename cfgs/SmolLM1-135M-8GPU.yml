@@ -62,3 +62,7 @@ dataset_weights:
   - 0.06
   - 0.01
 sequence_length: 2048
+
+#QknormArguments
+qk_output_dir: ./utils/135M_2norm_rank.pth
+sample_size: 1024
