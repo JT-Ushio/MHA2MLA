@@ -1,0 +1,63 @@
+# TrainingArguments
+seed: 42
+max_steps: 12000
+report_to: wandb
+run_name: qwen1_5-0_5B-d_kv_8
+save_strategy: steps
+save_steps: 0.1
+output_dir: ckpts/qwen1_5-0_5B-d_kv_8
+overwrite_output_dir: true
+logging_strategy: steps
+logging_steps: 1
+resume_from_checkpoint: null
+per_device_train_batch_size: 8
+remove_unused_columns: False
+gradient_accumulation_steps: 8
+bf16: true
+deepspeed: cfgs/ds_zero_2.json
+dataloader_drop_last: true
+# optim
+optim: adamw_torch
+max_grad_norm: 1.0
+learning_rate: 1.0e-4
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 1.0e-8
+weight_decay: 0.0
+# lr scheduler
+use_constant_with_warmup_decay_scheduler: true
+lr_scheduler_kwargs:
+  {
+    "lr_decay_starting_step": 10000,
+    "lr_decay_steps": 2000,
+    "lr_decay_style": "1-sqrt",
+    "lr_warmup_steps": 1200,
+    "lr_warmup_style": "linear",
+    "min_decay_lr": 0,
+  }
+
+# ModelArguments
+model_name_or_path: Qwen/Qwen1.5-0.5B
+partial_rope_version: 2-norm # 'high'/'low'/'uniform'/'2-norm'
+rope_dim_for_mla: 8
+uniform_start_point: 0 # optional only for 'uniform'
+qk_tensor_path: utils/qwen1.5_0.5B-2_norm_rank.pth # null / utils/qwen1.5_0.5B-2_norm_rank.pth
+svd_init_method: joint # 'split' / 'joint' / 'only_key' / 'only_value' / 'none'
+low_rank: 8
+is_baseline: false
+
+# DataArguments
+is_nanoset: true
+dataset_folders:
+  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/fineweb-edu-dedup/
+  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/cosmopedia-v2/
+  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/python-edu/
+  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/open-web-math/
+  - /cpfs01/shared/llm_ddd/jitao/data/MHA2MLA-corpus-qwen1_5/stackoverflow/
+dataset_weights:
+  - 0.7
+  - 0.15
+  - 0.08
+  - 0.06
+  - 0.01
+sequence_length: 2048

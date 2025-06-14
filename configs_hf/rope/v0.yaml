@@ -1,7 +1,0 @@
-partial_rope_version: 0  # 0 1 2 3 4 5
-top_k_rope_dim: 0
-last_k_rope_dim: 0
-uniform_start_point: 0
-uniform_step: 1
-qk_tensor_path: null
-n_gqa_group: 3

@@ -1,7 +1,0 @@
-partial_rope_version: 6  # 0 1 2 3 5
-top_k_rope_dim: 16
-last_k_rope_dim: 48
-uniform_start_point: 0
-uniform_step: 8
-qk_tensor_path: '/home/taoji/data/MLA-FT/utils/qk_tensor_135M.pth'
-n_gqa_group: 3

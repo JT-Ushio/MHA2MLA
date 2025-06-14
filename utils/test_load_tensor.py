@@ -1,29 +1,21 @@
-import pickle
 import torch
 
-# with open("qk_tensor_135M.pkl", "rb") as fin:
-#     qk_tensor = pickle.load(fin)  # torch.Size([30, 9, 32])
-#     qk_tensor = qk_tensor.view(30, 3, 3, 32).sum(dim=2)  # torch.Size([30, 3, 32])
 
-#     print(torch.any(qk_tensor < 0))
-#     topk_indices = torch.topk(input=qk_tensor[0], k=8, dim=1)[1]
-#     mask_matrix = torch.zeros_like(qk_tensor[0])
-#     mask_matrix.scatter_(1, topk_indices, 1)
-#     # print(qk_tensor[0][0])
-#     # print(mask_matrix[0][0])
-#     for x1, x2 in zip(qk_tensor[0][0], mask_matrix[0]):
-#         print(x1, x2)
+qk_rank_path = "qwen1.5_0.5B-2_norm_rank.pth"
+with open(qk_rank_path, "rb") as fin:
+    qk_norm_rank = torch.load(fin, weights_only=True)
+    # [n_layers, n_key_value_heads, d_head]
+    print(qk_norm_rank.size())  # torch.Size([24, 16, 64])
 
+    # same RoPE freqs have same rank
+    n_freqs = qk_norm_rank.size(-1) // 2
+    freqs_group_1 = qk_norm_rank[..., :n_freqs]
+    freqs_group_2 = qk_norm_rank[..., n_freqs:]
+    print(torch.eq(freqs_group_1, freqs_group_2))  # True
 
-with open("qk_tensor_135M.pth", "rb") as fin:
-    qk_tensor = torch.load(fin)  # torch.Size([30, 9, 32])
-    qk_tensor = qk_tensor.view(30, 3, 3, 32).sum(dim=2)  # torch.Size([30, 3, 32])
-
-    print(torch.any(qk_tensor < 0))
-    topk_indices = torch.topk(input=qk_tensor[0], k=8, dim=1)[1]
-    mask_matrix = torch.zeros_like(qk_tensor[0])
-    mask_matrix.scatter_(1, topk_indices, 1)
-    # print(qk_tensor[0][0])
-    # print(mask_matrix[0][0])
-    for x1, x2 in zip(qk_tensor[0][0], mask_matrix[0]):
-        print(x1, x2)
+    # rank from 0 to n_freqs-1
+    layer_id = 0
+    head_id = 0
+    print(qk_norm_rank[layer_id][head_id])
+    # [31, 30, 27, 26, 24, 22, 16, 17, 12, 14, 18, 9, 20, 29, 21, 15, 23, 19, 10, 5, 13, 7, 11, 25, 28, 3, 1, 4, 6, 2, 0, 8,
+    #  31, 30, 27, 26, 24, 22, 16, 17, 12, 14, 18, 9, 20, 29, 21, 15, 23, 19, 10, 5, 13, 7, 11, 25, 28, 3, 1, 4, 6, 2, 0, 8]
