@@ -1,5 +1,6 @@
 # checkpoints
 checkpoints/
+ckpts/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -166,7 +167,7 @@ cython_debug/
 
 
 
-# ckpt dataset and logs files
+# ckpt dataset, logs files and cache
 /eval_results
 /old_eval_results
 /checkpoints
@@ -177,6 +178,7 @@ wandb/
 /pj_scripts
 /scripts
 *.whl
+/cache
 
 # debug setting
 /.vscode
