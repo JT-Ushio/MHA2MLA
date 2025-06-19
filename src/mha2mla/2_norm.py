@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import torch
 from transformers import (
     HfArgumentParser,
@@ -12,30 +11,50 @@ from transformers import (
 import os
 from tqdm import tqdm
 import datasets
+import numpy as np
 
-from typing import Dict
-from helpers import load_dataset
+from nanotron.data.nanoset import Nanoset
 from arguments import (
-    MHA2MLAModelArguments,
     MHA2MLADataArguments,
-    MHA2MLATrainingArguments,
     QKNormArguments,
 )
 
 
-def load_tokenizer_and_model(model_args: MHA2MLAModelArguments):
+def load_dataset(dataset_args, qknorm_args, tokenizer):
+    """Load dataset from configuration."""
+    tokenizer.model_max_length = dataset_args.sequence_length
+    if dataset_args.is_nanoset:
+        token_size = 4 if len(tokenizer) > np.iinfo(np.uint16).max + 1 else 2
+        dataset = Nanoset(
+            dataset_folders=dataset_args.dataset_folders,
+            sequence_length=dataset_args.sequence_length,
+            dataset_weights=dataset_args.dataset_weights,
+            token_size=token_size,
+            train_split_num_samples=qknorm_args.sample_size,
+        )
+    else:
+        import datasets
+
+        dataset = datasets.load_dataset(
+            dataset_args.dataset_name_or_path, split="train"
+        )
+
+    return dataset
+
+
+def load_tokenizer_and_model(qknorm_args: QKNormArguments):
     """Load tokenizer and model from configuration."""
-    assert model_args.model_name_or_path is not None, (
+    assert qknorm_args.model_name_or_path is not None, (
         "Must provide the path to the model"
     )
-    model_args.tokenizer_name_or_path = model_args.model_name_or_path
+    qknorm_args.tokenizer_name_or_path = qknorm_args.model_name_or_path
 
-    config = AutoConfig.from_pretrained(model_args.model_name_or_path)
+    config = AutoConfig.from_pretrained(qknorm_args.model_name_or_path)
     model = AutoModelForCausalLM.from_pretrained(
-        model_args.model_name_or_path, config=config
+        qknorm_args.model_name_or_path, config=config
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(qknorm_args.tokenizer_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
@@ -61,20 +80,14 @@ def main():
         help="Path to the YAML configuration file.",
     )
     args = cmd_parser.parse_args()
-    hf_parser = HfArgumentParser(
-        (
-            MHA2MLATrainingArguments,
-            MHA2MLAModelArguments,
-            MHA2MLADataArguments,
-            QKNormArguments,
-        )
-    )
-    train_args, model_args, data_args, qknorm_args = hf_parser.parse_yaml_file(
-        args.config_file
-    )
+    hf_parser = HfArgumentParser((
+        MHA2MLADataArguments,
+        QKNormArguments,
+    ))
+    data_args, qknorm_args = hf_parser.parse_yaml_file(args.config_file)
 
-    model, tokenizer = load_tokenizer_and_model(model_args)
-    train_dataset = load_dataset(data_args, train_args, tokenizer)
+    model, tokenizer = load_tokenizer_and_model(qknorm_args)
+    train_dataset = load_dataset(data_args, qknorm_args, tokenizer)
     assert int(os.getenv("WORLD_SIZE", 1)) == 1, "Only support single process."
 
     def preprocess_function(examples):
@@ -100,7 +113,7 @@ def main():
         mlm=False,
         return_tensors="pt",
     )
-    batch_size = train_args.per_device_train_batch_size
+    batch_size = qknorm_args.batch_size
     data_loader = torch.utils.data.DataLoader(
         dataset=train_dataset,
         batch_size=batch_size,

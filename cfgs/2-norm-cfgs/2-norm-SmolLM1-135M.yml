@@ -1,0 +1,21 @@
+# DataArguments
+is_nanoset: true
+dataset_folders:
+  - /fs-computility/llm_fudan/jitao/data/MHA2MLA-corpus-smollm/fineweb-edu-dedup/
+  - /fs-computility/llm_fudan/jitao/data/MHA2MLA-corpus-smollm/cosmopedia-v2/
+  - /fs-computility/llm_fudan/jitao/data/MHA2MLA-corpus-smollm/python-edu/
+  - /fs-computility/llm_fudan/jitao/data/MHA2MLA-corpus-smollm/open-web-math/
+  - /fs-computility/llm_fudan/jitao/data/MHA2MLA-corpus-smollm/stackoverflow/
+dataset_weights:
+  - 0.7
+  - 0.15
+  - 0.08
+  - 0.06
+  - 0.01
+sequence_length: 2048
+
+#QknormArguments
+model_name_or_path: /fs-computility/llm_fudan/jitao/hf_home/hub/SmolLM-135M
+qk_output_dir: ./utils/135M_2norm_rank.pth
+sample_size: 1024
+batch_size: 2

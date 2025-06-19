@@ -49,8 +49,7 @@ class MHA2MLAModelArguments:
         metadata={"help": "if the finetuning is GQA2MHA2MLA"},
     )
     is_mla_from_scratch: bool = field(
-        default=False,
-        metadata={"help": "if the finetuning is from scratch"}
+        default=False, metadata={"help": "if the finetuning is from scratch"}
     )
 
     def __post_init__(self):
@@ -74,7 +73,9 @@ class MHA2MLAModelArguments:
 
         # Check bool arguments to avoid conflict
         if self.is_gqa2mha2mla or self.is_mla_from_scratch:
-            assert self.is_baseline == False, f"is_baseline must set to False when is_gqa2mha2mla=={self.is_gqa2mha2mla} or is_mla_from_scratch=={self.is_mla_from_scratch}"
+            assert self.is_baseline == False, (
+                f"is_baseline must set to False when is_gqa2mha2mla=={self.is_gqa2mha2mla} or is_mla_from_scratch=={self.is_mla_from_scratch}"
+            )
 
 
 @dataclass
@@ -110,8 +111,17 @@ class MHA2MLATrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "if the finetuning is freeze non attention parameters"},
     )
+
+
 @dataclass
 class QKNormArguments:
+    model_name_or_path: str = field(
+        default=None,
+        metadata={"help": "Path to pretrained model"},
+    )
+    batch_size: int = field(
+        default=0, metadata={"help": "batch_size of calibration data"}
+    )
     qk_output_dir: Optional[str] = field(
         default=None, metadata={"help": "path of qk_rank"}
     )
