@@ -1,12 +1,11 @@
 import os
 import argparse
-from pathlib import Path
 from time import perf_counter
 import pandas as pd
 import numpy as np
 from matplotlib import pyplot as plt
 import seaborn as sns
-from torch.profiler import profile, ProfilerActivity, record_function
+from torch.profiler import record_function
 
 import torch
 from transformers import AutoTokenizer, LlamaForCausalLM

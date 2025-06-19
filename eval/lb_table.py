@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 import json
-import re
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass, field
-from itertools import chain
 from pathlib import Path
-from typing import Optional, Union
+from typing import Union
 
 import pandas as pd
 

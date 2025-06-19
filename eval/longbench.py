@@ -1,12 +1,13 @@
 import bisect
 from dataclasses import dataclass
-import os, sys
+import os
+import sys
 import re
 import string
-from collections import Counter, defaultdict
+from collections import Counter
 from itertools import accumulate
 from transformers.modeling_utils import load_sharded_checkpoint
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 from transformers import (
     HfArgumentParser,
     AutoTokenizer,
@@ -37,6 +38,8 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
+from safetensors.torch import load_file
+
 
 current_file_path = os.path.abspath(__file__)
 target_directory = os.path.join(
@@ -48,7 +51,6 @@ from patching_qwen2 import mha2mla_qwen2
 from patching_qwen3 import mha2mla_qwen3
 from patching_llama import mha2mla_llama
 
-from safetensors.torch import load_file
 
 
 @dataclass
@@ -282,13 +284,13 @@ The correct answer is
         assert isinstance(data, dict)
         context_max = 8 * self.args.lb_max_tokens  # text_len/token_len <4 for en
         context_half = context_max // 2
-        prompt_truncated = False
+        # prompt_truncated = False
 
         if len(data["context"]) > context_max:  # truncate to save CPU
             data["context"] = (
                 data["context"][:context_half] + data["context"][-context_half:]
             )
-            prompt_truncated = True
+            # prompt_truncated = True
         prompt = self.prompt_template.strip().format(**data)  # strip to remove extra \n
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids[0]
         prompt_max = self.args.lb_max_tokens - 1  # for answer token
@@ -540,7 +542,7 @@ def rouge_score(prediction, ground_truth, **kwargs):
     rouge = Rouge()
     try:
         scores = rouge.get_scores([prediction], [ground_truth], avg=True)
-    except:
+    except ValueError as _:
         return 0.0
     return scores["rouge-l"]["f"]
 
@@ -638,7 +640,7 @@ def load_model(ckpt_path, dtype):
                 state_dict = load_file(signle_weight_file)
                 mla_model.load_state_dict(state_dict)
             else:
-                load_result = load_sharded_checkpoint(mla_model, ckpt_path)
+                _ = load_sharded_checkpoint(mla_model, ckpt_path)
             model = mla_model.to(dtype=dtype)
         return model
     else:

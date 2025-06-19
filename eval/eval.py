@@ -1,9 +1,10 @@
 import argparse
-import os, sys
+import os
+import sys
 
 from transformers.modeling_utils import load_sharded_checkpoint
 
-from lighteval.models.utils import _get_dtype, _simplify_name, batched
+from lighteval.models.utils import _get_dtype
 from lighteval.pipeline import (
     EnvConfig,
 )
@@ -21,6 +22,7 @@ from transformers import (
 )
 import types
 from lighteval.models.model_loader import BaseModel
+from safetensors.torch import load_file
 
 current_file_path = os.path.abspath(__file__)
 target_directory = os.path.join(
@@ -32,7 +34,6 @@ from patching_qwen2 import mha2mla_qwen2
 from patching_qwen3 import mha2mla_qwen3
 from patching_llama import mha2mla_llama
 
-from safetensors.torch import load_file
 
 
 def create_load_func(mha2mla_args):
@@ -78,7 +79,7 @@ def create_load_func(mha2mla_args):
                 state_dict = load_file(signle_weight_file)
                 mla_model.load_state_dict(state_dict)
             else:
-                load_result = load_sharded_checkpoint(mla_model, ckpt_path)
+                _ = load_sharded_checkpoint(mla_model, ckpt_path)
             model = mla_model.to(dtype=torch_dtype)
         return model
 

@@ -1,1 +1,0 @@
-from src.mha2mla.run_train import main
