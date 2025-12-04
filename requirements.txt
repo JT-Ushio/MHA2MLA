@@ -86,7 +86,7 @@ msgspec==0.19.0
 multidict==6.1.0
 multiprocess==0.70.16
 murmurhash==1.0.12
-nanotron==0.4
+git+https://github.com/huggingface/nanotron.git@2cde8f63519f15aa449803441ec70225644bd25d#egg=nanotron
 nest-asyncio==1.6.0
 networkx==3.4.2
 ninja==1.11.1.3
